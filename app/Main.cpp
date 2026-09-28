@@ -100,11 +100,11 @@ class App {
     std::array<HWND, 3> actions_{};
     std::array<HWND, 4> lists_{};
     std::array<HWND, 5> navigation_{};
-    HWND optionsGroup_ = nullptr;
+    HWND optionsHeading_ = nullptr;
     HWND chkStartOnBoot_ = nullptr;
     HWND chkAutoStart_ = nullptr;
     HWND lblOptDesc_ = nullptr;
-    HWND driverGroup_ = nullptr;
+    HWND driverHeading_ = nullptr;
     HWND lblDriverInfo_ = nullptr;
     HFONT font_ = nullptr, titleFont_ = nullptr;
     HBRUSH background_ = CreateSolidBrush(RGB(245, 247, 250));
@@ -192,22 +192,24 @@ class App {
     }
     void Layout() {
         RECT area{}; GetClientRect(window_, &area); int width = area.right, height = area.bottom;
-        auto move = [](HWND h, int x, int y, int w, int v) { MoveWindow(h, x, y, (std::max)(1, w), (std::max)(1, v), TRUE); };
+        // Move every control before repainting so a resize cannot draw a mix of
+        // old and new positions or leave stale text in newly exposed areas.
+        auto move = [](HWND h, int x, int y, int w, int v) { MoveWindow(h, x, y, (std::max)(1, w), (std::max)(1, v), FALSE); };
         move(title_, Scale(238), Scale(26), width - Scale(454), Scale(38));
         move(subtitle_, Scale(240), Scale(71), width - Scale(264), Scale(24));
         move(start_, width - Scale(206), Scale(30), Scale(178), Scale(38));
         for (int i = 0; i < 5; ++i) move(navigation_[i], Scale(14), Scale(123 + i * 49), Scale(180), Scale(41));
         for (int i = 0; i < 3; ++i) move(actions_[i], Scale(254 + i * 173), Scale(224), Scale(160), Scale(32));
         for (HWND list : lists_) move(list, Scale(254), Scale(273), width - Scale(298), height - Scale(407));
-        move(optionsGroup_, Scale(254), Scale(273), width - Scale(298), Scale(160));
+        move(optionsHeading_, Scale(274), Scale(279), width - Scale(338), Scale(22));
         move(chkStartOnBoot_, Scale(274), Scale(304), width - Scale(338), Scale(26));
         move(chkAutoStart_, Scale(274), Scale(336), width - Scale(338), Scale(26));
         move(lblOptDesc_, Scale(274), Scale(368), width - Scale(338), Scale(52));
-        move(driverGroup_, Scale(254), Scale(445), width - Scale(298), Scale(130));
+        move(driverHeading_, Scale(274), Scale(451), width - Scale(338), Scale(22));
         move(lblDriverInfo_, Scale(274), Scale(475), width - Scale(338), Scale(88));
         move(note_, Scale(240), height - Scale(108), width - Scale(268), Scale(40));
         move(status_, Scale(240), height - Scale(58), width - Scale(268), Scale(44));
-        InvalidateRect(window_, nullptr, FALSE);
+        RedrawWindow(window_, nullptr, nullptr, RDW_INVALIDATE | RDW_ERASE | RDW_ALLCHILDREN);
     }
     void Page(int page) {
         page_ = page;
@@ -228,18 +230,18 @@ class App {
         };
         for (int i = 0; i < 4; ++i) ShowWindow(lists_[i], i == page ? SW_SHOW : SW_HIDE);
         const int optShow = (page == 4) ? SW_SHOW : SW_HIDE;
-        ShowWindow(optionsGroup_, optShow);
+        ShowWindow(optionsHeading_, optShow);
         ShowWindow(chkStartOnBoot_, optShow);
         ShowWindow(chkAutoStart_, optShow);
         ShowWindow(lblOptDesc_, optShow);
-        ShowWindow(driverGroup_, optShow);
+        ShowWindow(driverHeading_, optShow);
         ShowWindow(lblDriverInfo_, optShow);
         for (int i = 0; i < 3; ++i) {
             SetWindowTextW(actions_[i], texts[page][i]); ShowWindow(actions_[i], *texts[page][i] ? SW_SHOW : SW_HIDE);
-            EnableWindow(actions_[i], (page != 0 && page != 4) || !broker_.IsMonitoring());
+            EnableWindow(actions_[i], page != 0 || !broker_.IsMonitoring());
         }
         SetWindowTextW(note_, notes[page]);
-        // Repaint newly exposed areas as well as overlapping group-box children.
+        // Repaint newly exposed areas and the selected page's controls.
         RedrawWindow(window_, nullptr, nullptr, RDW_INVALIDATE | RDW_ERASE | RDW_ALLCHILDREN);
     }
     void RefreshSettings() {
@@ -488,7 +490,9 @@ class App {
             {L"Decision", 80}, {L"Reason", 180}, {L"NTSTATUS", 100}, {L"Bytes: requested / actual", 175}});
         Columns(lists_[3], {{L"Time left", 80}, {L"PID", 70}, {L"Program", 310}, {L"File", 370}, {L"Access", 150}});
 
-        optionsGroup_ = Control(L"BUTTON", L"Startup & Automation Options", BS_GROUPBOX | WS_CLIPSIBLINGS);
+        // Section borders are painted by the parent. Full-size group-box child
+        // windows overlap the sibling controls and clip the parent's background.
+        optionsHeading_ = Control(L"STATIC", L"Startup & Automation Options", SS_NOPREFIX);
         chkStartOnBoot_ = Control(L"BUTTON", L"Start application when Windows starts (at logon with admin privileges)",
             WS_TABSTOP | BS_AUTOCHECKBOX, ID_OPT_BOOT);
         chkAutoStart_ = Control(L"BUTTON", L"Start monitoring automatically when application launches",
@@ -497,12 +501,8 @@ class App {
             L"• Windows Startup: Automatically launches Secure File Monitor with administrator privileges on user logon.\n"
             L"• Auto-Start: Immediately initiates monitoring on launch if protected files are configured.",
             0);
-        driverGroup_ = Control(L"BUTTON", L"Driver Information & Mode", BS_GROUPBOX | WS_CLIPSIBLINGS);
+        driverHeading_ = Control(L"STATIC", L"Driver Information & Mode", SS_NOPREFIX);
         lblDriverInfo_ = Control(L"STATIC", L"", 0);
-        // These group boxes surround sibling controls, rather than owning them.
-        // Keep their painting behind the checkbox and label windows.
-        for (HWND group : {optionsGroup_, driverGroup_})
-            SetWindowPos(group, HWND_BOTTOM, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
 
         note_ = Control(L"STATIC", L"", 0);
         status_ = Control(L"STATIC", L"", 0);
@@ -573,6 +573,12 @@ class App {
         }
         RECT panel{Scale(238), Scale(207), area.right - Scale(28), area.bottom - Scale(120)};
         Rounded(dc, panel, Scale(10), RGB(255, 255, 255), RGB(228, 233, 241));
+        if (page_ == 4) {
+            RECT options{Scale(254), Scale(273), area.right - Scale(44), Scale(433)};
+            RECT driver{Scale(254), Scale(445), area.right - Scale(44), Scale(575)};
+            Rounded(dc, options, Scale(6), RGB(255, 255, 255), RGB(215, 221, 231));
+            Rounded(dc, driver, Scale(6), RGB(255, 255, 255), RGB(215, 221, 231));
+        }
         EndPaint(window_, &paint);
     }
     void DrawButton(const DRAWITEMSTRUCT* item) {
@@ -626,12 +632,14 @@ class App {
             SetBkMode(reinterpret_cast<HDC>(wparam), TRANSPARENT);
             SetTextColor(reinterpret_cast<HDC>(wparam), RGB(29, 43, 62));
             if (ctl == chkStartOnBoot_ || ctl == chkAutoStart_ || ctl == lblOptDesc_ ||
-                ctl == optionsGroup_ || ctl == driverGroup_ || ctl == lblDriverInfo_) {
+                ctl == optionsHeading_ || ctl == driverHeading_ || ctl == lblDriverInfo_) {
                 return reinterpret_cast<LRESULT>(GetStockObject(WHITE_BRUSH));
             }
             return reinterpret_cast<LRESULT>(background_);
         }
-        case WM_ERASEBKGND: { RECT rect{}; GetClientRect(window_, &rect); FillRect(reinterpret_cast<HDC>(wparam), &rect, background_); return 1; }
+        // Paint() fills the entire invalid region with the final background.
+        // A separate gray erase causes flashes behind the white Options panel.
+        case WM_ERASEBKGND: return 1;
         case WM_PAINT: Paint(); return 0;
         case WM_DRAWITEM: DrawButton(reinterpret_cast<DRAWITEMSTRUCT*>(lparam)); return TRUE;
         case WM_COMMAND:
@@ -643,15 +651,20 @@ class App {
             else if (LOWORD(wparam) >= ID_NAV_FIRST && LOWORD(wparam) < ID_NAV_FIRST + 5) Page(LOWORD(wparam) - ID_NAV_FIRST);
             else if (LOWORD(wparam) == ID_OPT_BOOT) {
                 bool enabled = (IsDlgButtonChecked(window_, ID_OPT_BOOT) == BST_CHECKED);
-                settings_.startOnBoot = enabled;
-                ConfigureWindowsStartup(enabled);
-                Save(settings_);
+                Settings next = settings_;
+                next.startOnBoot = enabled;
+                try {
+                    Save(std::move(next));
+                    ConfigureWindowsStartup(enabled);
+                } catch (...) { RefreshSettings(); throw; }
                 UpdateStatusLine(enabled ? L"Configured to start at Windows startup." : L"Removed from Windows startup.");
             }
             else if (LOWORD(wparam) == ID_OPT_MONITOR) {
                 bool enabled = (IsDlgButtonChecked(window_, ID_OPT_MONITOR) == BST_CHECKED);
-                settings_.autoStartMonitoring = enabled;
-                Save(settings_);
+                Settings next = settings_;
+                next.autoStartMonitoring = enabled;
+                try { Save(std::move(next)); }
+                catch (...) { RefreshSettings(); throw; }
                 UpdateStatusLine(enabled ? L"Auto-start monitoring enabled." : L"Auto-start monitoring disabled.");
             }
             return 0;

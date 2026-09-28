@@ -21,6 +21,13 @@ CMonitorContoller::~CMonitorContoller()
 
 BOOL CMonitorContoller::Connect()
 {
+	// Stop() pauses collection but deliberately retains the port and workers.
+	// Reuse that connection on restart: opening another port can fail because
+	// the driver already has this client connected, and can lose the old handle.
+	if (m_hPort && m_hPort != INVALID_HANDLE_VALUE) {
+		return TRUE;
+	}
+	m_hPort = NULL;
 	BOOL bOk = FALSE;
 	ULONG Flag = 0;
 
@@ -36,16 +43,18 @@ BOOL CMonitorContoller::Connect()
 	// Phase 1: Check if any Procmon communication port is already active
 	for (size_t p = 0; p < _countof(s_candidatePorts); ++p)
 	{
+		HANDLE candidatePort = NULL;
 		HRESULT hResult = FilterConnectCommunicationPort(s_candidatePorts[p],
 			0,
 			&Flag,
 			sizeof(ULONG),
 			NULL,
-			&m_hPort);
+			&candidatePort);
 
 		LogMessage(L_INFO, TEXT("FilterConnectCommunicationPort('%s') -> 0x%08X"), s_candidatePorts[p], hResult);
 
 		if (SUCCEEDED(hResult)) {
+			m_hPort = candidatePort;
 			LogMessage(L_INFO, TEXT("Connected to existing driver port '%s'"), s_candidatePorts[p]);
 			bOk = TRUE;
 			break;
@@ -75,16 +84,18 @@ BOOL CMonitorContoller::Connect()
 
 				for (size_t p = 0; p < _countof(s_candidatePorts); ++p)
 				{
+					HANDLE candidatePort = NULL;
 					HRESULT hResult = FilterConnectCommunicationPort(s_candidatePorts[p],
 						0,
 						&Flag,
 						sizeof(ULONG),
 						NULL,
-						&m_hPort);
+						&candidatePort);
 
 					LogMessage(L_INFO, TEXT("Post-load FilterConnectCommunicationPort('%s') -> 0x%08X"), s_candidatePorts[p], hResult);
 
 					if (SUCCEEDED(hResult)) {
+						m_hPort = candidatePort;
 						LogMessage(L_INFO, TEXT("Successfully connected to driver port '%s'"), s_candidatePorts[p]);
 						bOk = TRUE;
 						break;
