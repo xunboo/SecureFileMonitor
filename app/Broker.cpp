@@ -27,49 +27,92 @@ void Broker::Configure(const Settings& settings, bool enabled) {
 void Broker::Start(const Settings& settings) {
     if (monitoring_) return;
     if (!IsAdministrator()) throw std::runtime_error(
-        "Configuration is available without elevation. To intercept file access, close this app "
+        "Configuration is available without elevation. To monitor file access, close this app "
         "using Exit in the tray menu, then launch SecureFileMonitor.App.exe using 'Run as administrator'.");
     if (settings.files.empty()) throw std::runtime_error("Add at least one file before starting monitoring.");
+
+    Settings resolved = settings;
+    std::erase_if(resolved.files, [](const auto& file) { return !file.enabled; });
+    if (resolved.files.empty()) throw std::runtime_error("Enable at least one protected file before starting monitoring.");
+    for (auto& file : resolved.files) file.ntPath = ResolveFile(file.path).ntPath;
+
+    // Try connecting to SecureFileMonitor driver first
+    bool sfmConnected = false;
     if (!connected_) {
         if (receiver_.joinable() || poller_.joinable()) Shutdown();
         HANDLE raw = INVALID_HANDLE_VALUE;
         HRESULT hr = FilterConnectCommunicationPort(SFM_PORT_NAME, 0, nullptr, 0, nullptr, &raw);
-        if (FAILED(hr)) throw std::runtime_error(
-            "The SecureFileMonitor driver is not loaded or its port is unavailable.\n\n"
-            "Build and install the WDK driver, run 'fltmc load SecureFileMonitor' as administrator, "
-            "then click Start monitoring. No file access is being intercepted.\n\n" + Utf8(ErrorText(HRESULT_CODE(hr))));
-        port_.reset(raw);
-        stopEvent_.reset(CreateEventW(nullptr, TRUE, FALSE, nullptr));
-        if (!stopEvent_) { port_.reset(); throw std::runtime_error("Cannot create broker stop event."); }
-        // Recover a fail-closed configuration left by a crashed broker before
-        // resolving files. Our process is now exempt, and this acknowledgement
-        // establishes a known stopped state even if later path resolution fails.
-        try { Configure({}, false); }
-        catch (...) { port_.reset(); stopEvent_.reset(); throw; }
-        connected_ = true; faulted_ = false;
-        try {
-            receiver_ = std::thread(&Broker::ReceiveLoop, this);
-            poller_ = std::thread(&Broker::PollLoop, this);
-        } catch (...) { Shutdown(); throw; }
+        if (SUCCEEDED(hr)) {
+            port_.reset(raw);
+            stopEvent_.reset(CreateEventW(nullptr, TRUE, FALSE, nullptr));
+            if (!stopEvent_) { port_.reset(); throw std::runtime_error("Cannot create broker stop event."); }
+            try { Configure({}, false); }
+            catch (...) { port_.reset(); stopEvent_.reset(); throw; }
+            connected_ = true; faulted_ = false; driverType_ = DriverType::SecureFileMonitor;
+            try {
+                receiver_ = std::thread(&Broker::ReceiveLoop, this);
+                poller_ = std::thread(&Broker::PollLoop, this);
+            } catch (...) { Shutdown(); throw; }
+            sfmConnected = true;
+        }
+    } else if (driverType_ == DriverType::SecureFileMonitor) {
+        sfmConnected = true;
     }
-    Settings resolved = settings;
-    for (auto& file : resolved.files) file.ntPath = ResolveFile(file.path).ntPath;
-    {
-        std::lock_guard lock(stateMutex_);
-        settings_ = resolved; permissions_.clear();
+
+    if (sfmConnected) {
+        // Run under custom SecureFileMonitor driver (active enforcement mode)
+        {
+            std::lock_guard lock(stateMutex_);
+            settings_ = resolved; permissions_.clear();
+        }
+        monitoring_ = true;
+        try { Configure(resolved, true); }
+        catch (...) { monitoring_ = false; throw; }
+        try { logger_.Diagnostic("monitoring_started", resolved.files.size(), L"Monitoring selected local NTFS paths (SecureFileMonitor driver)"); }
+        catch (...) {
+            try { Pause(); } catch (...) {}
+            throw;
+        }
+        if (onStatus) onStatus(L"Interactive monitoring is active. Unanswered requests are denied after 20 seconds.");
+    } else {
+        // Custom driver not loaded. Fall back to ProcMon driver (passive notification mode)
+        {
+            std::lock_guard lock(stateMutex_);
+            notifications_.Clear();
+        }
+        bool procMonStarted = procMonMonitor_.Start(resolved.files,
+            [this](const std::wstring& file, DWORD pid, const std::wstring& prog, ULONG op, LONG status) {
+                OnProcMonAccess(file, pid, prog, op, status);
+            });
+
+        if (!procMonStarted) {
+            throw std::runtime_error(
+                "The SecureFileMonitor driver is not loaded, and the ProcMon driver fallback could not be started.\n\n"
+                "• For interactive protection: load SecureFileMonitor.sys in a test VM (docs\\driver-validation.md).\n"
+                "• For ProcMon notification mode: ensure PROCMON24.SYS or PROCMON25.SYS is in System32\\drivers.");
+        }
+
+        driverType_ = DriverType::ProcMon;
+        connected_ = true;
+        faulted_ = false;
+        monitoring_ = true;
+        {
+            std::lock_guard lock(stateMutex_);
+            settings_ = resolved;
+        }
+        logger_.Diagnostic("monitoring_started", resolved.files.size(), L"ProcMon driver loaded (notification-only mode)");
+        if (onStatus) onStatus(L"Monitoring active (ProcMon driver). Protected file accesses will notify without prompts.");
     }
-    // Set before enabling the kernel so the first request cannot race the UI state.
-    monitoring_ = true;
-    try { Configure(resolved, true); }
-    catch (...) { monitoring_ = false; throw; }
-    try { logger_.Diagnostic("monitoring_started", resolved.files.size(), L"Monitoring selected local NTFS paths"); }
-    catch (...) {
-        try { Pause(); } catch (...) { /* Pause disarms before trying to write its log. */ }
-        throw;
-    }
-    if (onStatus) onStatus(L"Monitoring is active. Unanswered requests are denied after 20 seconds.");
 }
 void Broker::Pause() {
+    if (driverType_ == DriverType::ProcMon) {
+        procMonMonitor_.Stop();
+        monitoring_ = false; faulted_ = false; connected_ = false;
+        driverType_ = DriverType::None;
+        logger_.Diagnostic("monitoring_stopped", 0, L"ProcMon driver monitoring stopped");
+        if (onStatus) onStatus(L"Monitoring stopped (ProcMon driver).");
+        return;
+    }
     if (!port_) { monitoring_ = false; return; }
     Settings snapshot;
     {
@@ -89,6 +132,12 @@ void Broker::Pause() {
     if (onStatus) onStatus(L"Monitoring stopped. The driver no longer intercepts selected files.");
 }
 void Broker::Shutdown() {
+    if (driverType_ == DriverType::ProcMon) {
+        procMonMonitor_.Stop();
+        monitoring_ = false; connected_ = false; faulted_ = false;
+        driverType_ = DriverType::None;
+        return;
+    }
     if (!port_) return;
     try { Pause(); } catch (...) { /* A broken connection leaves configured paths fail-closed. */ }
     if (stopEvent_) SetEvent(stopEvent_.get());
@@ -102,6 +151,34 @@ void Broker::Shutdown() {
     std::lock_guard lock(stateMutex_);
     for (const auto& [id, request] : pending_) { (void)id; request->completed = true; }
     pending_.clear(); permissions_.clear();
+}
+void Broker::OnProcMonAccess(const std::wstring& file, DWORD pid, const std::wstring& program, ULONG op, LONG status) {
+    if (!monitoring_ || driverType_ != DriverType::ProcMon) return;
+
+    LogRow row;
+    row.file = file;
+    row.program = program.empty() ? ResolveProcess(pid, 0) : program;
+    row.event.Request.Version = SFM_PROTOCOL_VERSION;
+    row.event.Request.Operation = op;
+    row.event.Request.ProcessId = pid;
+    row.event.Request.TimeUtc = NowUtc();
+    wcsncpy_s(row.event.Request.Path, file.c_str(), _TRUNCATE);
+    row.event.CompletedUtc = NowUtc();
+    row.event.Decision = SfmAllow;
+    row.event.Reason = SfmProcMon;
+    row.event.Status = status;
+    row.event.Phase = SfmCompleted;
+
+    logger_.Append(row);
+    if (onRows) onRows({row});
+    if (onNotification) {
+        bool notify;
+        {
+            std::lock_guard lock(stateMutex_);
+            notify = notifications_.ShouldNotify(file, row.program, op, pid);
+        }
+        if (notify) onNotification(file, row.program, OperationText(op));
+    }
 }
 void Broker::UpdateRules(const std::vector<Rule>& rules) {
     std::lock_guard lock(stateMutex_); settings_.rules = rules;
@@ -292,5 +369,38 @@ void Broker::PollLoop() {
         for (int i = 0; i < 100 && PollEvents(); ++i) {}
         logger_.Flush();
     } catch (const std::exception& error) { Fault(Wide(error.what())); }
+}
+std::wstring Broker::GetDriverStatusText() const {
+    if (monitoring_) {
+        if (driverType_ == DriverType::SecureFileMonitor) {
+            return L"SecureFileMonitor.sys (Active interception mode)";
+        }
+        if (driverType_ == DriverType::ProcMon) {
+            return L"Sysinternals ProcMon (Passive notification mode)";
+        }
+    }
+    // Check if SecureFileMonitor port can be connected
+    HANDLE raw = INVALID_HANDLE_VALUE;
+    HRESULT hr = FilterConnectCommunicationPort(SFM_PORT_NAME, 0, nullptr, 0, nullptr, &raw);
+    if (SUCCEEDED(hr)) {
+        CloseHandle(raw);
+        return L"SecureFileMonitor.sys (Standby)";
+    }
+    // Check candidate ProcMon ports
+    static const LPCWSTR s_candidatePorts[] = {
+        L"\\ProcessMonitor24Port",
+        L"\\ProcessMonitor25Port",
+        L"\\ProcessMonitor23Port",
+        L"\\OpenProcessMonitor24Port"
+    };
+    for (const auto* pName : s_candidatePorts) {
+        ULONG flag = 0;
+        hr = FilterConnectCommunicationPort(pName, 0, &flag, sizeof(flag), nullptr, &raw);
+        if (SUCCEEDED(hr)) {
+            CloseHandle(raw);
+            return L"Sysinternals ProcMon (Standby)";
+        }
+    }
+    return L"No driver is loaded";
 }
 }

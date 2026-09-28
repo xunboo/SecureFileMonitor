@@ -11,3 +11,4 @@ packages/
 *.log
 driver/x64/
 x64/
+*.filters

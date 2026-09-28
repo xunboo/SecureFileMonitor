@@ -1,22 +1,38 @@
 # Secure File Monitor
 
-A native C++ Windows desktop application and WDK file-system minifilter for making access decisions on selected local files. The Visual Studio 2026 solution contains the actual Win32 GUI, tray integration, kernel interception code, rule engine, persistent logging, and a separate process for exercising file I/O.
+A native C++ Windows desktop application and file-system security monitor for tracking and controlling access to selected local files. The Visual Studio 2026 solution contains the Win32 GUI, tray integration, dual kernel interception modes (custom minifilter + officially signed ProcMon fallback), rule engine, persistent logging, and an I/O test probe.
 
 ![Secure File Monitor](assets/screenshot.png)
 
-**This is a development implementation for testing in a Windows VM.** The driver builds unsigned. It must be signed and installed before monitoring works. It has not been loaded or runtime-validated on this machine. The application does not substitute `FileSystemWatcher` notifications for access enforcement, and it does not claim that an absent driver is protecting files.
+### Dual-Driver Architecture
+
+Secure File Monitor supports two operational driver modes:
+
+1. **Active Interception Mode (`SecureFileMonitor.sys`)**:
+   - Uses the custom WDK minifilter driver for pre-operation I/O interception (`IRP_MJ_CREATE`, `IRP_MJ_READ`, `IRP_MJ_WRITE`).
+   - Supports active blocking, fail-closed timeouts, and interactive user decision prompts (Allow / Deny / Remember rule).
+   - Intended for testing environments with test-signing enabled (Windows Test Mode / VM).
+
+2. **Passive Notification Fallback (`PROCMON24.SYS` or `PROCMON25.SYS`)**:
+   - When the custom driver is not loaded (e.g., standard retail Windows installations where Test Mode cannot be enabled), the application automatically falls back to the officially signed [Microsoft Sysinternals Process Monitor](https://learn.microsoft.com/en-us/sysinternals/downloads/procmon) driver (`PROCMON24.SYS` or `PROCMON25.SYS`).
+   - Leverages `procmonsdk` to attach to the official ProcMon kernel driver without triggering driver signature enforcement warnings.
+   - Operates in non-blocking observation mode: whenever any protected file is accessed by an external process, the app logs the access and immediately alerts the user via a Windows tray balloon notification, skipping modal decision prompts.
 
 ## Features
 
 - Native Windows 10/11-style interface: sidebar navigation, status cards, rounded controls, DPI awareness, keyboard navigation, and native file/rule dialogs.
 - Original multi-resolution app/tray icon, with editable SVG source.
-- Select up to 128 individual files on local NTFS volumes. Their named data streams are included.
-- Intercept supported user-mode `IRP_MJ_CREATE`, `IRP_MJ_READ`, and `IRP_MJ_WRITE` operations before they proceed.
-- Tray notification and a decision dialog with a countdown, executable path, PID, target file, and requested access.
+- Dual-mode driver support: active pre-operation blocking via custom minifilter or zero-friction passive notifications via signed Sysinternals driver without Test Mode.
+- Select up to 128 individual files on local NTFS volumes, with individual enable/disable checkboxes and automatic detection of common sensitive files.
+- Intercept supported user-mode `IRP_MJ_CREATE`, `IRP_MJ_READ`, and `IRP_MJ_WRITE` operations before they proceed (active mode).
+- Tray notification and a decision dialog with a countdown, executable path, PID, target file, and requested access (active mode).
+- Instant balloon notification and logging on protected file access without interrupting workflow (ProcMon fallback mode).
 - Allow or deny the current operation, grant permission for that process lifetime, or save an executable/file rule.
 - Separate read/write permissions and Ask/Allow/Deny rules. Rules match full executable paths, not just process names.
 - Actual I/O completion status and transferred bytes in the log, separate from the policy decision.
 - JSONL and spreadsheet-safe CSV logs for every event received during the application session. Export the entire current CSV, not just visible rows.
+- Dedicated **Options** tab: toggle Windows startup integration (launches with admin privileges at user logon) and configure automatic monitoring start on launch.
+- Persistent driver status line displaying exactly which driver is loaded (`SecureFileMonitor.sys` in Active mode, `Sysinternals ProcMon` in Notification mode, or `No driver is loaded`).
 - Fail-closed decisions on timeout, disconnect, overload, and unsafe-to-defer matching requests. Explicitly stopping monitoring disables interception.
 
 ## Open and build in Visual Studio
@@ -24,7 +40,7 @@ A native C++ Windows desktop application and WDK file-system minifilter for maki
 1. Open **`SecureFileMonitor.sln`** in **Visual Studio 2026**.
 2. Install **Desktop development with C++**, the **MSVC v145** tools, the **Windows Driver Kit** Visual Studio component, and the actual **Windows SDK + WDK 10.0.28000.0**. The driver project pins that kit version; retarget it if using another compatible WDK. The Visual Studio component alone does not contain the kernel headers/libraries.
 3. Select **Debug | x64** or **Release | x64** and choose **Build Solution**.
-4. Set **SecureFileMonitor.App** as the startup project. Configuration and rule editing work without administrator privileges. For actual monitoring, run the built executable **as administrator** after installing/loading the driver.
+4. Set **SecureFileMonitor.App** as the startup project. The application manifest requires administrator privileges (`requireAdministrator`), automatically prompting for UAC elevation on launch so the kernel drivers can be loaded and controlled immediately.
 
 All four projects compile with warning level 4 and warnings treated as errors. The app and tools use the static C++ runtime; there are no NuGet, .NET, Qt, or web runtime dependencies.
 
@@ -39,12 +55,13 @@ From PowerShell:
 
 The build script selects the installed Visual Studio and 64-bit MSBuild, normalizes inherited build environment variables, and uses the SDK/WDK toolsets directly. Build does not sign, install, or load any driver and does not change Windows security settings.
 
-| Project | Output under `out\x64\Release\` | Purpose |
+| Project | Output path | Purpose |
 |---|---|---|
-| SecureFileMonitor.App | `SecureFileMonitor.App\SecureFileMonitor.App.exe` | Desktop, rules, tray, decision broker, logs |
-| SecureFileMonitor.Driver | `SecureFileMonitor.Driver\SecureFileMonitor.sys` | File-system minifilter |
-| SecureFileMonitor.Tests | `SecureFileMonitor.Tests\SecureFileMonitor.Tests.exe` | Native rule/protocol/storage tests |
-| IoProbe | `IoProbe\IoProbe.exe` | Real read/append operations from a separate process |
+| procmonsdk | `sdk\procmonsdk\x64\Release\procmonsdk.lib` | OpenProcMon SDK library for Sysinternals driver communication |
+| SecureFileMonitor.App | `out\x64\Release\SecureFileMonitor.App\SecureFileMonitor.App.exe` | Desktop GUI, rules, tray, decision broker, ProcMon monitor, logs |
+| SecureFileMonitor.Driver | `out\x64\Release\SecureFileMonitor.Driver\SecureFileMonitor.sys` | File-system minifilter for active pre-op interception |
+| SecureFileMonitor.Tests | `out\x64\Release\SecureFileMonitor.Tests\SecureFileMonitor.Tests.exe` | Native rule/protocol/storage tests |
+| IoProbe | `out\x64\Release\IoProbe\IoProbe.exe` | Real read/append operations from a separate process |
 
 ## First monitoring session
 
@@ -104,7 +121,8 @@ The notification is a real Windows notification-area balloon. Windows notificati
 
 The native test suite checks rule precedence, combined-access authorization, path boundaries and streams, executable identity, Unicode/JSON/CSV escaping, configuration validation/atomic persistence, wire layout, PID creation-time checking, and log/export content. It does not load the kernel driver.
 
-- `app/`: Win32 GUI, core rules, broker, storage and logging.
+- `app/`: Win32 GUI, core rules, broker, ProcMon monitor wrapper, storage and logging.
+- `sdk/procmonsdk/`: OpenProcMon SDK library for communication with official Sysinternals `PROCMON24.SYS` / `PROCMON25.SYS`.
 - `driver/`: minifilter C++, WDK project, and INF.
 - `shared/Protocol.h`: fixed-layout versioned communication contract with compile-time size checks.
 - `tests/`: native test runner.

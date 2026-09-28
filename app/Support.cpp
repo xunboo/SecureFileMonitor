@@ -1,6 +1,7 @@
 #include "Support.h"
 #include <commdlg.h>
 #include <shlobj.h>
+#include <shellapi.h>
 #include <sstream>
 #include <fstream>
 #include <iomanip>
@@ -130,21 +131,35 @@ Settings LoadSettings(const std::filesystem::path& path) {
     std::ifstream input(path, std::ios::binary);
     if (!input) throw std::runtime_error("Cannot read configuration.");
     std::string line;
-    if (!std::getline(input, line) || line != "SecureFileMonitor 1")
+    if (!std::getline(input, line))
+        throw std::runtime_error("Unsupported or damaged configuration. The file has been left unchanged.");
+    if (!line.empty() && line.back() == '\r') line.pop_back();
+    if (line != "SecureFileMonitor 1")
         throw std::runtime_error("Unsupported or damaged configuration. The file has been left unchanged.");
     Settings result;
     while (std::getline(input, line)) {
+        if (!line.empty() && line.back() == '\r') line.pop_back();
         if (line.empty()) continue;
         std::istringstream row(line); std::string kind, pathText, programText;
         row >> kind;
         if (kind == "file") {
             if (!(row >> std::quoted(pathText))) throw std::runtime_error("Invalid file configuration.");
-            result.files.push_back({Wide(pathText), {}});
+            int enabledVal = 1;
+            if (!(row >> enabledVal)) {
+                row.clear();
+                enabledVal = 1;
+            }
+            result.files.push_back({Wide(pathText), {}, enabledVal != 0});
         } else if (kind == "rule") {
             ULONG operations = 0; int action = 0;
             if (!(row >> std::quoted(pathText) >> std::quoted(programText) >> operations >> action) || action < 0 || action > 2)
                 throw std::runtime_error("Invalid rule configuration.");
             result.rules.push_back({Wide(pathText), Wide(programText), operations, static_cast<Action>(action)});
+        } else if (kind == "option") {
+            std::string optName; int optVal = 0;
+            if (!(row >> optName >> optVal)) throw std::runtime_error("Invalid option configuration.");
+            if (optName == "startOnBoot") result.startOnBoot = (optVal != 0);
+            else if (optName == "autoStartMonitoring") result.autoStartMonitoring = (optVal != 0);
         } else throw std::runtime_error("Unknown configuration entry.");
         row >> std::ws;
         if (!row.eof()) throw std::runtime_error("Unexpected data in configuration.");
@@ -155,10 +170,12 @@ Settings LoadSettings(const std::filesystem::path& path) {
 void SaveSettings(const std::filesystem::path& path, const Settings& settings) {
     ValidateSettings(settings);
     std::ostringstream text; text << "SecureFileMonitor 1\n";
-    for (const auto& file : settings.files) text << "file " << std::quoted(Utf8(file.path)) << '\n';
+    for (const auto& file : settings.files) text << "file " << std::quoted(Utf8(file.path)) << ' ' << (file.enabled ? 1 : 0) << '\n';
     for (const auto& rule : settings.rules)
         text << "rule " << std::quoted(Utf8(rule.file)) << ' ' << std::quoted(Utf8(rule.program))
              << ' ' << rule.operations << ' ' << static_cast<int>(rule.action) << '\n';
+    if (settings.startOnBoot) text << "option startOnBoot 1\n";
+    if (settings.autoStartMonitoring) text << "option autoStartMonitoring 1\n";
     auto temporary = path; temporary += L".tmp";
     Handle file(CreateFileW(temporary.c_str(), GENERIC_WRITE, 0, nullptr, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr));
     if (!file) throw std::runtime_error("Cannot save configuration: " + Utf8(ErrorText()));
@@ -247,4 +264,131 @@ void Logger::ExportCsv(const std::filesystem::path& destination) {
         throw std::runtime_error("Cannot export CSV: " + Utf8(ErrorText()));
 }
 std::filesystem::path Logger::Path() const { std::lock_guard lock(mutex_); return jsonPath_; }
+
+bool ConfigureWindowsStartup(bool enable) {
+    wchar_t exePath[MAX_PATH]{};
+    GetModuleFileNameW(nullptr, exePath, MAX_PATH);
+    std::wstring quotedExe = L"\"" + std::wstring(exePath) + L"\"";
+
+    // 1. Registry Run Key (HKCU\Software\Microsoft\Windows\CurrentVersion\Run)
+    HKEY hKey = nullptr;
+    if (RegOpenKeyExW(HKEY_CURRENT_USER, L"Software\\Microsoft\\Windows\\CurrentVersion\\Run", 0, KEY_SET_VALUE, &hKey) == ERROR_SUCCESS) {
+        if (enable) {
+            RegSetValueExW(hKey, L"SecureFileMonitor", 0, REG_SZ,
+                reinterpret_cast<const BYTE*>(quotedExe.c_str()),
+                static_cast<DWORD>((quotedExe.size() + 1) * sizeof(wchar_t)));
+        } else {
+            RegDeleteValueW(hKey, L"SecureFileMonitor");
+        }
+        RegCloseKey(hKey);
+    }
+
+    // 2. Scheduled Task with highest privileges (runs elevated on logon without UAC prompt)
+    if (enable) {
+        std::wstring schCmd = L"/Create /TN \"SecureFileMonitor\" /TR \"\\\"" + std::wstring(exePath) + L"\\\"\" /SC ONLOGON /RL HIGHEST /F";
+        SHELLEXECUTEINFOW sei{sizeof(sei)};
+        sei.cbSize = sizeof(sei);
+        sei.fMask = SEE_MASK_NOCLOSEPROCESS;
+        sei.lpVerb = L"open";
+        sei.lpFile = L"schtasks.exe";
+        sei.lpParameters = schCmd.c_str();
+        sei.nShow = SW_HIDE;
+        if (ShellExecuteExW(&sei) && sei.hProcess) {
+            WaitForSingleObject(sei.hProcess, 5000);
+            CloseHandle(sei.hProcess);
+        }
+    } else {
+        std::wstring schCmd = L"/Delete /TN \"SecureFileMonitor\" /F";
+        SHELLEXECUTEINFOW sei{sizeof(sei)};
+        sei.cbSize = sizeof(sei);
+        sei.fMask = SEE_MASK_NOCLOSEPROCESS;
+        sei.lpVerb = L"open";
+        sei.lpFile = L"schtasks.exe";
+        sei.lpParameters = schCmd.c_str();
+        sei.nShow = SW_HIDE;
+        if (ShellExecuteExW(&sei) && sei.hProcess) {
+            WaitForSingleObject(sei.hProcess, 5000);
+            CloseHandle(sei.hProcess);
+        }
+    }
+    return true;
+}
+
+bool IsWindowsStartupEnabled() {
+    HKEY hKey = nullptr;
+    if (RegOpenKeyExW(HKEY_CURRENT_USER, L"Software\\Microsoft\\Windows\\CurrentVersion\\Run", 0, KEY_QUERY_VALUE, &hKey) == ERROR_SUCCESS) {
+        DWORD type = 0;
+        LONG res = RegQueryValueExW(hKey, L"SecureFileMonitor", nullptr, &type, nullptr, nullptr);
+        RegCloseKey(hKey);
+        if (res == ERROR_SUCCESS) return true;
+    }
+    return false;
+}
+
+std::wstring GetChromeLoginDataPath() {
+    PWSTR localAppData = nullptr;
+    if (SUCCEEDED(SHGetKnownFolderPath(FOLDERID_LocalAppData, 0, nullptr, &localAppData))) {
+        std::filesystem::path p(localAppData);
+        CoTaskMemFree(localAppData);
+        p = p / L"Google" / L"Chrome" / L"User Data" / L"Default" / L"Login Data";
+        return p.wstring();
+    }
+    wchar_t env[MAX_PATH]{};
+    if (GetEnvironmentVariableW(L"LOCALAPPDATA", env, MAX_PATH) > 0) {
+        std::filesystem::path p(env);
+        p = p / L"Google" / L"Chrome" / L"User Data" / L"Default" / L"Login Data";
+        return p.wstring();
+    }
+    return L"";
+}
+
+std::wstring GetEdgeLoginDataPath() {
+    PWSTR localAppData = nullptr;
+    if (SUCCEEDED(SHGetKnownFolderPath(FOLDERID_LocalAppData, 0, nullptr, &localAppData))) {
+        std::filesystem::path p(localAppData);
+        CoTaskMemFree(localAppData);
+        p = p / L"Microsoft" / L"Edge" / L"User Data" / L"Default" / L"Login Data";
+        return p.wstring();
+    }
+    wchar_t env[MAX_PATH]{};
+    if (GetEnvironmentVariableW(L"LOCALAPPDATA", env, MAX_PATH) > 0) {
+        std::filesystem::path p(env);
+        p = p / L"Microsoft" / L"Edge" / L"User Data" / L"Default" / L"Login Data";
+        return p.wstring();
+    }
+    return L"";
+}
+
+static void TryAddDefaultFile(Settings& settings, const std::wstring& targetPath) {
+    if (targetPath.empty()) return;
+
+    DWORD attr = GetFileAttributesW(targetPath.c_str());
+    if (attr == INVALID_FILE_ATTRIBUTES || (attr & FILE_ATTRIBUTE_DIRECTORY)) {
+        return;
+    }
+
+    for (const auto& file : settings.files) {
+        if (EqualPath(file.path, targetPath)) {
+            return;
+        }
+    }
+
+    try {
+        ProtectedFile pf = ResolveFile(targetPath);
+        pf.enabled = false;
+        for (const auto& file : settings.files) {
+            if (EqualPath(file.path, pf.path)) {
+                return;
+            }
+        }
+        settings.files.push_back(std::move(pf));
+    } catch (...) {
+        settings.files.push_back({targetPath, L"", false});
+    }
+}
+
+void EnsureDefaultProtectedFiles(Settings& settings) {
+    TryAddDefaultFile(settings, GetChromeLoginDataPath());
+    TryAddDefaultFile(settings, GetEdgeLoginDataPath());
+}
 }

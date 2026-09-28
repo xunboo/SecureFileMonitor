@@ -20,6 +20,40 @@ int wmain(int argc, wchar_t** argv) {
     std::filesystem::path scratch = std::filesystem::absolute(argv[1]);
     std::filesystem::create_directories(scratch);
     const std::wstring file = L"C:\\Documents\\important.txt", program = L"C:\\Apps\\editor.exe";
+    Test("duplicate notifications wait for a ten-second quiet period", [&] {
+        AccessNotificationFilter filter;
+        const auto start = std::chrono::steady_clock::time_point{};
+        Require(filter.ShouldNotify(file, program, SfmRead, 1, start), "First access suppressed");
+        Require(!filter.ShouldNotify(file, program, SfmRead, 1, start + std::chrono::milliseconds(9999)), "Repeat not suppressed");
+        Require(!filter.ShouldNotify(file, program, SfmRead, 1, start + std::chrono::seconds(10)), "Repeat did not extend quiet period");
+        Require(filter.ShouldNotify(file, program, SfmRead, 1, start + std::chrono::seconds(20)), "Notification missing at ten-second boundary");
+        Require(filter.ShouldNotify(file, program, SfmRead, 1, start + std::chrono::seconds(31)), "Notification missing after quiet period");
+    });
+    Test("notification identity includes file executable and exact operation", [&] {
+        AccessNotificationFilter filter;
+        const auto now = std::chrono::steady_clock::time_point{};
+        Require(filter.ShouldNotify(file, program, SfmRead, 1, now), "First access suppressed");
+        Require(!filter.ShouldNotify(L"c:\\documents\\IMPORTANT.TXT", L"c:\\apps\\EDITOR.EXE", SfmRead, 2, now), "Case or PID split same program");
+        Require(filter.ShouldNotify(file + L".backup", program, SfmRead, 1, now), "Different file suppressed");
+        Require(filter.ShouldNotify(file, L"C:\\Other\\editor.exe", SfmRead, 1, now), "Different executable suppressed");
+        Require(filter.ShouldNotify(file, program, SfmWrite, 1, now), "Different operation suppressed");
+        Require(filter.ShouldNotify(file, program, SfmOpen | SfmRead, 1, now), "Combined operation suppressed");
+        Require(!filter.ShouldNotify(file, program, SfmRead, 1, now), "Interleaved events lost original identity");
+    });
+    Test("unknown program notifications are separated by PID", [&] {
+        AccessNotificationFilter filter;
+        const auto now = std::chrono::steady_clock::time_point{};
+        Require(filter.ShouldNotify(file, {}, SfmRead, 1, now), "First unknown program suppressed");
+        Require(!filter.ShouldNotify(file, {}, SfmRead, 1, now), "Unknown program repeat not suppressed");
+        Require(filter.ShouldNotify(file, {}, SfmRead, 2, now), "Different unknown program suppressed");
+    });
+    Test("new monitoring session resets notification suppression", [&] {
+        AccessNotificationFilter filter;
+        const auto now = std::chrono::steady_clock::time_point{};
+        Require(filter.ShouldNotify(file, program, SfmRead, 1, now), "First access suppressed");
+        filter.Clear();
+        Require(filter.ShouldNotify(file, program, SfmRead, 1, now), "New session inherited suppression");
+    });
     Test("unmatched access asks", [&] { Require(Evaluate({}, file, program, SfmRead).action == Action::Ask, "Unexpected default"); });
     Test("allow an exact read", [&] {
         Require(Evaluate({{file, program, SfmRead, Action::Allow}}, file, program, SfmRead).action == Action::Allow, "Read not allowed");
@@ -76,12 +110,35 @@ int wmain(int argc, wchar_t** argv) {
         Require(CsvEscape("a,\"b\"") == "\"a,\"\"b\"\"\"", "Incorrect CSV escaping");
     });
     Test("settings persist Unicode and escaped paths atomically", [&] {
-        Settings settings{{{file, {}}, {L"C:\\文档\\résumé.txt", {}}}, {{file, program, 1, Action::Allow}, {file, {}, 2, Action::Deny}}};
+        Settings settings{{{file, {}, false}, {L"C:\\文档\\résumé.txt", {}, true}}, {{file, program, 1, Action::Allow}, {file, {}, 2, Action::Deny}}, true, true};
         auto path = scratch / L"roundtrip.sfm"; SaveSettings(path, settings); auto loaded = LoadSettings(path);
         Require(loaded.files.size() == 2 && loaded.files[1].path == settings.files[1].path, "Files lost");
+        Require(!loaded.files[0].enabled && loaded.files[1].enabled, "Enabled flag lost");
         Require(loaded.rules.size() == 2 && loaded.rules[0].program == program, "Rules lost");
         Require(loaded.rules[1].action == Action::Deny, "Action lost");
+        Require(loaded.startOnBoot && loaded.autoStartMonitoring, "Options lost");
         Require(!std::filesystem::exists(path.wstring() + L".tmp"), "Uncommitted temp file");
+    });
+    Test("legacy settings without enabled flag defaults to enabled", [&] {
+        auto path = scratch / L"legacy.sfm";
+        {
+            std::ofstream output(path);
+            output << "SecureFileMonitor 1\nfile \"" << Utf8(file) << "\"\n";
+        }
+        auto loaded = LoadSettings(path);
+        Require(loaded.files.size() == 1, "Legacy file not loaded");
+        Require(loaded.files[0].enabled, "Legacy file should default to enabled");
+    });
+    Test("chrome login data path helper resolves", [&] {
+        std::wstring p = GetChromeLoginDataPath();
+        Require(!p.empty(), "Chrome path is empty");
+        Require(p.find(L"Login Data") != std::wstring::npos, "Login Data path missing filename");
+    });
+    Test("edge login data path helper resolves", [&] {
+        std::wstring p = GetEdgeLoginDataPath();
+        Require(!p.empty(), "Edge path is empty");
+        Require(p.find(L"Login Data") != std::wstring::npos, "Edge Login Data path missing filename");
+        Require(p.find(L"Microsoft\\Edge") != std::wstring::npos, "Edge path missing Microsoft\\Edge");
     });
     Test("corrupt configuration is rejected and preserved", [&] {
         auto path = scratch / L"corrupt.sfm"; { std::ofstream output(path); output << "SecureFileMonitor 1\nrule broken\n"; }

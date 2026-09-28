@@ -2,6 +2,7 @@
 #include <Windows.h>
 #include "../shared/Protocol.h"
 #include <algorithm>
+#include <chrono>
 #include <string>
 #include <vector>
 
@@ -10,6 +11,7 @@ enum class Action { Ask, Allow, Deny };
 struct ProtectedFile {
     std::wstring path;
     std::wstring ntPath;
+    bool enabled = true;
 };
 struct Rule {
     std::wstring file;
@@ -20,6 +22,8 @@ struct Rule {
 struct Settings {
     std::vector<ProtectedFile> files;
     std::vector<Rule> rules;
+    bool startOnBoot = false;
+    bool autoStartMonitoring = false;
 };
 struct Evaluation {
     Action action = Action::Ask;
@@ -29,6 +33,37 @@ struct Evaluation {
 inline bool EqualPath(const std::wstring& a, const std::wstring& b) {
     return CompareStringOrdinal(a.c_str(), -1, b.c_str(), -1, TRUE) == CSTR_EQUAL;
 }
+class AccessNotificationFilter {
+    using Clock = std::chrono::steady_clock;
+    struct RecentAccess {
+        std::wstring file, program;
+        ULONG operation;
+        DWORD unknownProgramPid;
+        Clock::time_point lastSeen;
+    };
+    std::vector<RecentAccess> recent_;
+public:
+    void Clear() { recent_.clear(); }
+    // Call under the broker state lock. Repeated accesses extend the quiet period.
+    bool ShouldNotify(const std::wstring& file, const std::wstring& program,
+                      ULONG operation, DWORD pid, Clock::time_point now = Clock::now()) {
+        std::erase_if(recent_, [now](const RecentAccess& access) {
+            return now - access.lastSeen >= std::chrono::seconds(10);
+        });
+        // Known executables group across process instances; unresolved programs
+        // use the PID so unrelated unknown processes do not suppress each other.
+        const DWORD unknownProgramPid = program.empty() ? pid : 0;
+        for (auto& access : recent_) {
+            if (access.operation == operation && access.unknownProgramPid == unknownProgramPid &&
+                EqualPath(access.file, file) && EqualPath(access.program, program)) {
+                access.lastSeen = now;
+                return false;
+            }
+        }
+        recent_.push_back({file, program, operation, unknownProgramPid, now});
+        return true;
+    }
+};
 inline bool MatchesFile(const std::wstring& request, const std::wstring& target) {
     // Include named streams of the selected file, never sibling prefixes.
     if (EqualPath(request, target)) return true;
@@ -76,6 +111,7 @@ inline std::wstring ReasonText(ULONG reason) {
     case SfmStopping: return L"Monitoring stopped";
     case SfmInvalidReply: return L"Invalid broker reply";
     case SfmSessionRule: return L"Process session permission";
+    case SfmProcMon: return L"ProcMon observation";
     default: return L"Unknown";
     }
 }

@@ -18,6 +18,7 @@ constexpr UINT WM_TRAY = WM_APP + 1, WM_ROWS = WM_APP + 2, WM_REQUESTS = WM_APP 
 constexpr int ID_START = 200, ID_TAB = 201, ID_ACTION1 = 202, ID_ACTION2 = 203, ID_ACTION3 = 204;
 constexpr UINT ID_TRAY_OPEN = 300, ID_TRAY_TOGGLE = 301, ID_TRAY_LOGS = 302, ID_TRAY_EXIT = 303;
 constexpr int ID_NAV_FIRST = 500;
+constexpr int ID_OPT_BOOT = 601, ID_OPT_MONITOR = 602;
 
 void Rounded(HDC dc, const RECT& rect, int radius, COLORREF fill, COLORREF border) {
     Gdiplus::Graphics graphics(dc); graphics.SetSmoothingMode(Gdiplus::SmoothingModeAntiAlias);
@@ -98,12 +99,19 @@ class App {
     HWND status_ = nullptr, note_ = nullptr, prompt_ = nullptr;
     std::array<HWND, 3> actions_{};
     std::array<HWND, 4> lists_{};
-    std::array<HWND, 4> navigation_{};
+    std::array<HWND, 5> navigation_{};
+    HWND optionsGroup_ = nullptr;
+    HWND chkStartOnBoot_ = nullptr;
+    HWND chkAutoStart_ = nullptr;
+    HWND lblOptDesc_ = nullptr;
+    HWND driverGroup_ = nullptr;
+    HWND lblDriverInfo_ = nullptr;
     HFONT font_ = nullptr, titleFont_ = nullptr;
     HBRUSH background_ = CreateSolidBrush(RGB(245, 247, 250));
     UINT taskbarCreated_ = RegisterWindowMessageW(L"TaskbarCreated");
     int page_ = 0;
     bool exiting_ = false, trayAdded_ = false, configHealthy_ = true;
+    bool updatingList_ = false;
     std::filesystem::path data_, config_;
     Settings settings_;
     Logger logger_;
@@ -159,22 +167,44 @@ class App {
         UINT dpi = GetDpiForWindow(window_);
         data.hIcon = static_cast<HICON>(LoadImageW(instance_, MAKEINTRESOURCEW(IDI_MONITOR), IMAGE_ICON,
             GetSystemMetricsForDpi(SM_CXSMICON, dpi), GetSystemMetricsForDpi(SM_CYSMICON, dpi), LR_SHARED));
-        wcscpy_s(data.szTip, broker_.IsMonitoring() ? L"Secure File Monitor - monitoring" : L"Secure File Monitor - stopped");
+        wcscpy_s(data.szTip, broker_.IsMonitoring() ?
+            (broker_.IsProcMonMode() ? L"Secure File Monitor - ProcMon mode" : L"Secure File Monitor - monitoring") :
+            L"Secure File Monitor - stopped");
         if (!trayAdded_) {
             trayAdded_ = Shell_NotifyIconW(NIM_ADD, &data) != FALSE;
             data.uVersion = NOTIFYICON_VERSION_4; Shell_NotifyIconW(NIM_SETVERSION, &data);
         } else Shell_NotifyIconW(NIM_MODIFY, &data);
     }
     void Show() { ShowWindow(window_, SW_RESTORE); SetForegroundWindow(window_); }
+    void UpdateStatusLine(const std::wstring& customMessage = L"") {
+        std::wstring driver = broker_.GetDriverStatusText();
+        std::wstring line = L"Driver: " + driver + L"   |   ";
+        if (!customMessage.empty()) {
+            line += customMessage;
+        } else if (broker_.IsMonitoring()) {
+            size_t enabledCount = std::count_if(settings_.files.begin(), settings_.files.end(), [](const auto& f) { return f.enabled; });
+            line += L"Monitoring active (" + std::to_wstring(enabledCount) + L" protected files, " +
+                    std::to_wstring(settings_.rules.size()) + L" rules).";
+        } else {
+            line += L"Ready. Click Start monitoring to begin.";
+        }
+        SetWindowTextW(status_, line.c_str());
+    }
     void Layout() {
         RECT area{}; GetClientRect(window_, &area); int width = area.right, height = area.bottom;
         auto move = [](HWND h, int x, int y, int w, int v) { MoveWindow(h, x, y, (std::max)(1, w), (std::max)(1, v), TRUE); };
         move(title_, Scale(238), Scale(26), width - Scale(454), Scale(38));
         move(subtitle_, Scale(240), Scale(71), width - Scale(264), Scale(24));
         move(start_, width - Scale(206), Scale(30), Scale(178), Scale(38));
-        for (int i = 0; i < 4; ++i) move(navigation_[i], Scale(14), Scale(123 + i * 49), Scale(180), Scale(41));
+        for (int i = 0; i < 5; ++i) move(navigation_[i], Scale(14), Scale(123 + i * 49), Scale(180), Scale(41));
         for (int i = 0; i < 3; ++i) move(actions_[i], Scale(254 + i * 173), Scale(224), Scale(160), Scale(32));
         for (HWND list : lists_) move(list, Scale(254), Scale(273), width - Scale(298), height - Scale(407));
+        move(optionsGroup_, Scale(254), Scale(273), width - Scale(298), Scale(160));
+        move(chkStartOnBoot_, Scale(274), Scale(304), width - Scale(338), Scale(26));
+        move(chkAutoStart_, Scale(274), Scale(336), width - Scale(338), Scale(26));
+        move(lblOptDesc_, Scale(274), Scale(368), width - Scale(338), Scale(52));
+        move(driverGroup_, Scale(254), Scale(445), width - Scale(298), Scale(130));
+        move(lblDriverInfo_, Scale(274), Scale(475), width - Scale(338), Scale(88));
         move(note_, Scale(240), height - Scale(108), width - Scale(268), Scale(40));
         move(status_, Scale(240), height - Scale(58), width - Scale(268), Scale(44));
         InvalidateRect(window_, nullptr, FALSE);
@@ -182,34 +212,76 @@ class App {
     void Page(int page) {
         page_ = page;
         for (HWND nav : navigation_) InvalidateRect(nav, nullptr, FALSE);
-        const wchar_t* texts[4][3] = {
-            {L"Add file...", L"Remove selected", L""},
+        const wchar_t* texts[5][3] = {
+            {L"Add file...", L"Remove selected", L"Enable / Disable"},
             {L"Add rule...", L"Edit selected...", L"Remove selected"},
             {L"Export session CSV...", L"Open logs folder", L"Clear view"},
-            {L"Review request", L"Allow once", L"Block once"}
+            {L"Review request", L"Allow once", L"Block once"},
+            {L"Open startup apps", L"Open config folder", L""}
         };
         const wchar_t* notes[] = {
             L"Select individual files on local NTFS volumes. Named streams are included. Stop monitoring to change this list.",
             L"Rules use full executable paths. Deny overrides Ask, then Allow. Editing rules clears temporary process permissions.",
             L"The view keeps the latest 2,000 events. JSONL and CSV session logs keep all received events, including denials and failures. Times are UTC.",
-            L"The requesting program waits for your decision. Closing a prompt or reaching its 20-second deadline denies that operation."
+            L"The requesting program waits for your decision. Closing a prompt or reaching its 20-second deadline denies that operation.",
+            L"Configure Windows startup and monitoring automation preferences."
         };
         for (int i = 0; i < 4; ++i) ShowWindow(lists_[i], i == page ? SW_SHOW : SW_HIDE);
+        const int optShow = (page == 4) ? SW_SHOW : SW_HIDE;
+        ShowWindow(optionsGroup_, optShow);
+        ShowWindow(chkStartOnBoot_, optShow);
+        ShowWindow(chkAutoStart_, optShow);
+        ShowWindow(lblOptDesc_, optShow);
+        ShowWindow(driverGroup_, optShow);
+        ShowWindow(lblDriverInfo_, optShow);
         for (int i = 0; i < 3; ++i) {
             SetWindowTextW(actions_[i], texts[page][i]); ShowWindow(actions_[i], *texts[page][i] ? SW_SHOW : SW_HIDE);
-            EnableWindow(actions_[i], page != 0 || !broker_.IsMonitoring());
+            EnableWindow(actions_[i], (page != 0 && page != 4) || !broker_.IsMonitoring());
         }
         SetWindowTextW(note_, notes[page]);
+        // Repaint newly exposed areas as well as overlapping group-box children.
+        RedrawWindow(window_, nullptr, nullptr, RDW_INVALIDATE | RDW_ERASE | RDW_ALLCHILDREN);
     }
     void RefreshSettings() {
+        struct Guard {
+            bool& flag;
+            Guard(bool& f) : flag(f) { flag = true; }
+            ~Guard() { flag = false; }
+        } guard(updatingList_);
         ListView_DeleteAllItems(lists_[0]); ListView_DeleteAllItems(lists_[1]);
-        for (const auto& file : settings_.files)
-            Row(lists_[0], {file.path, L"Exact path + streams", broker_.IsFaulted() ? L"State unknown" : broker_.IsMonitoring() ? L"Monitoring" : L"Stopped"});
+        for (size_t i = 0; i < settings_.files.size(); ++i) {
+            const auto& file = settings_.files[i];
+            std::wstring state;
+            if (!file.enabled) state = L"Disabled";
+            else if (broker_.IsFaulted()) state = L"State unknown";
+            else if (broker_.IsMonitoring()) state = L"Monitoring";
+            else state = L"Stopped";
+            Row(lists_[0], {file.enabled ? L"Enabled" : L"Disabled", file.path, L"Exact path + streams", state});
+            ListView_SetCheckState(lists_[0], static_cast<int>(i), file.enabled ? TRUE : FALSE);
+        }
         for (const auto& rule : settings_.rules)
             Row(lists_[1], {rule.file, rule.program.empty() ? L"Any program" : rule.program, OperationText(rule.operations), ActionText(rule.action)});
         SetWindowTextW(start_, broker_.IsMonitoring() ? L"Stop monitoring" : L"Start monitoring");
         SetWindowTextW(subtitle_, broker_.IsFaulted() ? L"Driver connection fault. Configured files may still be blocked." :
-            broker_.IsMonitoring() ? L"Monitoring selected files. You're in control of each access." : L"Choose your files. Set the rules. Stay in control.");
+            broker_.IsMonitoring() ? (broker_.IsProcMonMode() ?
+                L"Monitoring selected files via ProcMon driver (notification-only mode)." :
+                L"Monitoring selected files. You're in control of each access.") :
+            L"Choose your files. Set the rules. Stay in control.");
+        CheckDlgButton(window_, ID_OPT_BOOT, settings_.startOnBoot ? BST_CHECKED : BST_UNCHECKED);
+        CheckDlgButton(window_, ID_OPT_MONITOR, settings_.autoStartMonitoring ? BST_CHECKED : BST_UNCHECKED);
+        if (lblDriverInfo_) {
+            std::wstring drvDetails = L"Current driver: " + broker_.GetDriverStatusText() + L"\n" +
+                (broker_.IsProcMonMode() ?
+                    L"Mode: Sysinternals ProcMon (PROCMON24.SYS / PROCMON25.SYS) - Passive notification mode.\n"
+                    L"Pre-operation blocking is disabled; file accesses notify immediately via tray alerts." :
+                 broker_.GetDriverType() == DriverType::SecureFileMonitor ?
+                    L"Mode: SecureFileMonitor.sys Minifilter - Active interception and blocking mode.\n"
+                    L"Pre-operation access is intercepted with 20-second decision prompts." :
+                    L"Mode: Standby - No driver is currently intercepting or observing files.\n"
+                    L"Click Start monitoring to load or connect to the driver.");
+            SetWindowTextW(lblDriverInfo_, drvDetails.c_str());
+        }
+        UpdateStatusLine();
         Page(page_); Tray(); InvalidateRect(window_, nullptr, FALSE);
     }
     void Save(Settings next) {
@@ -251,10 +323,14 @@ class App {
                         throw std::runtime_error("This file is already in the protected list.");
                 if (next.files.size() >= SFM_MAX_FILES) throw std::runtime_error("The protected file limit is 128.");
                 next.files.push_back(std::move(file));
-            } else {
+            } else if (button == 1) {
                 int selected = Selected(lists_[0]); if (selected < 0) return;
                 auto file = next.files.at(selected).path; next.files.erase(next.files.begin() + selected);
                 std::erase_if(next.rules, [&](const Rule& rule) { return EqualPath(rule.file, file); });
+            } else if (button == 2) {
+                int selected = Selected(lists_[0]);
+                if (selected < 0 || selected >= static_cast<int>(next.files.size())) return;
+                next.files[selected].enabled = !next.files[selected].enabled;
             }
             Save(std::move(next));
         } else if (page_ == 1) {
@@ -271,11 +347,14 @@ class App {
             Save(std::move(next));
         } else if (page_ == 2) {
             if (button == 0) Export(); else if (button == 1) OpenLogs(); else ListView_DeleteAllItems(lists_[2]);
-        } else {
+        } else if (page_ == 3) {
             int selected = Selected(lists_[3]); if (selected < 0 || selected >= static_cast<int>(requests_.size())) return;
             if (button == 0) ShowPrompt(requests_[selected]);
             else broker_.Decide(requests_[selected], button == 1, false);
             RefreshRequests();
+        } else if (page_ == 4) {
+            if (button == 0) ShellExecuteW(window_, L"open", L"ms-settings:startupapps", nullptr, nullptr, SW_SHOWNORMAL);
+            else if (button == 1) ShellExecuteW(window_, L"open", data_.c_str(), nullptr, nullptr, SW_SHOWNORMAL);
         }
     }
     void RefreshRequests() {
@@ -363,7 +442,9 @@ class App {
     void DrainRows() {
         std::deque<LogRow> rows;
         { std::lock_guard lock(uiMutex_); rows.swap(incomingRows_); }
-        SendMessageW(lists_[2], WM_SETREDRAW, FALSE, 0);
+        // WM_SETREDRAW(TRUE) adds WS_VISIBLE. Never send it to a hidden page.
+        const bool logVisible = (GetWindowLongPtrW(lists_[2], GWL_STYLE) & WS_VISIBLE) != 0;
+        if (logVisible) SendMessageW(lists_[2], WM_SETREDRAW, FALSE, 0);
         for (const auto& row : rows) {
             const auto& event = row.event;
             wchar_t result[32]{}; swprintf_s(result, L"0x%08lX", static_cast<ULONG>(event.Status));
@@ -373,8 +454,14 @@ class App {
                 ReasonText(event.Reason), result, std::to_wstring(event.Request.RequestedBytes) + L" / " + std::to_wstring(event.TransferredBytes)}, 0);
             if (ListView_GetItemCount(lists_[2]) > 2000) ListView_DeleteItem(lists_[2], 2000);
         }
-        SendMessageW(lists_[2], WM_SETREDRAW, TRUE, 0); InvalidateRect(lists_[2], nullptr, FALSE);
-        RefreshSettings();
+        if (logVisible) {
+            SendMessageW(lists_[2], WM_SETREDRAW, TRUE, 0);
+            RedrawWindow(lists_[2], nullptr, nullptr, RDW_INVALIDATE | RDW_ERASE | RDW_FRAME | RDW_ALLCHILDREN);
+        }
+        // Access events only change the log and counters, not settings or tabs.
+        RECT area{}; GetClientRect(window_, &area);
+        RECT counters{Scale(238), Scale(113), area.right - Scale(28), Scale(192)};
+        InvalidateRect(window_, &counters, FALSE);
     }
     void Create() {
         Fonts();
@@ -383,25 +470,45 @@ class App {
         subtitle_ = Control(L"STATIC", L"", 0);
         start_ = Control(L"BUTTON", L"Start monitoring", WS_TABSTOP | BS_OWNERDRAW, ID_START);
         int tabIndex = 0;
-        for (const auto* text : {L"Protected files", L"Access rules", L"Live access log", L"Pending requests"}) {
+        for (const auto* text : {L"Protected files", L"Access rules", L"Live access log", L"Pending requests", L"Options"}) {
             navigation_[tabIndex] = Control(L"BUTTON", text, WS_TABSTOP | BS_OWNERDRAW, ID_NAV_FIRST + tabIndex);
             ++tabIndex;
         }
         for (int i = 0; i < 3; ++i) actions_[i] = Control(L"BUTTON", L"", WS_TABSTOP | BS_OWNERDRAW, ID_ACTION1 + i);
         for (int i = 0; i < 4; ++i) {
             lists_[i] = Control(WC_LISTVIEWW, L"", WS_TABSTOP | LVS_REPORT | LVS_SINGLESEL | LVS_SHOWSELALWAYS, 400 + i);
-            ListView_SetExtendedListViewStyle(lists_[i], LVS_EX_FULLROWSELECT | LVS_EX_DOUBLEBUFFER | LVS_EX_LABELTIP);
+            DWORD exStyle = LVS_EX_FULLROWSELECT | LVS_EX_DOUBLEBUFFER | LVS_EX_LABELTIP;
+            if (i == 0) exStyle |= LVS_EX_CHECKBOXES;
+            ListView_SetExtendedListViewStyle(lists_[i], exStyle);
             SetWindowTheme(lists_[i], L"Explorer", nullptr);
         }
-        Columns(lists_[0], {{L"Protected file", 650}, {L"Scope", 180}, {L"State", 120}});
+        Columns(lists_[0], {{L"Enable", 100}, {L"Protected file", 560}, {L"Scope", 160}, {L"State", 120}});
         Columns(lists_[1], {{L"File", 370}, {L"Application", 370}, {L"Access", 150}, {L"Decision", 100}});
         Columns(lists_[2], {{L"Time (UTC)", 190}, {L"PID", 70}, {L"Program", 240}, {L"File", 300}, {L"Operation", 130},
             {L"Decision", 80}, {L"Reason", 180}, {L"NTSTATUS", 100}, {L"Bytes: requested / actual", 175}});
         Columns(lists_[3], {{L"Time left", 80}, {L"PID", 70}, {L"Program", 310}, {L"File", 370}, {L"Access", 150}});
+
+        optionsGroup_ = Control(L"BUTTON", L"Startup & Automation Options", BS_GROUPBOX | WS_CLIPSIBLINGS);
+        chkStartOnBoot_ = Control(L"BUTTON", L"Start application when Windows starts (at logon with admin privileges)",
+            WS_TABSTOP | BS_AUTOCHECKBOX, ID_OPT_BOOT);
+        chkAutoStart_ = Control(L"BUTTON", L"Start monitoring automatically when application launches",
+            WS_TABSTOP | BS_AUTOCHECKBOX, ID_OPT_MONITOR);
+        lblOptDesc_ = Control(L"STATIC",
+            L"• Windows Startup: Automatically launches Secure File Monitor with administrator privileges on user logon.\n"
+            L"• Auto-Start: Immediately initiates monitoring on launch if protected files are configured.",
+            0);
+        driverGroup_ = Control(L"BUTTON", L"Driver Information & Mode", BS_GROUPBOX | WS_CLIPSIBLINGS);
+        lblDriverInfo_ = Control(L"STATIC", L"", 0);
+        // These group boxes surround sibling controls, rather than owning them.
+        // Keep their painting behind the checkbox and label windows.
+        for (HWND group : {optionsGroup_, driverGroup_})
+            SetWindowPos(group, HWND_BOTTOM, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
+
         note_ = Control(L"STATIC", L"", 0);
-        status_ = Control(L"STATIC", IsAdministrator() ?
-            L"Ready. Add files and rules, then start monitoring. A loaded WDK driver is required." :
-            L"Configuration mode. Run this app as administrator to start monitoring after the WDK driver is installed.", 0);
+        status_ = Control(L"STATIC", L"", 0);
+        broker_.onNotification = [this](auto file, auto program, auto op) {
+            Balloon(L"Protected file accessed (ProcMon)", op + L": " + file + (program.empty() ? L"" : (L"\nProgram: " + program)), NIIF_INFO);
+        };
         broker_.onRequest = [this](auto request) {
             { std::lock_guard lock(uiMutex_); incomingRequests_.push_back(std::move(request)); }
             PostMessageW(window_, WM_REQUESTS, 0, 0);
@@ -425,6 +532,14 @@ class App {
         DwmSetWindowAttribute(window_, 33, &cornerPreference, sizeof(cornerPreference));
         COLORREF caption = RGB(245, 247, 250);
         DwmSetWindowAttribute(window_, 35, &caption, sizeof(caption));
+
+        if (settings_.autoStartMonitoring && !settings_.files.empty() && !broker_.IsMonitoring()) {
+            try {
+                Toggle();
+            } catch (const std::exception& error) {
+                UpdateStatusLine(L"Auto-start monitoring failed: " + Wide(error.what()));
+            }
+        }
     }
     void Paint() {
         PAINTSTRUCT paint{}; HDC dc = BeginPaint(window_, &paint);
@@ -439,7 +554,9 @@ class App {
         RECT sidebarNote{Scale(23), area.bottom - Scale(94), Scale(188), area.bottom - Scale(16)};
         SetTextColor(dc, RGB(98, 110, 128));
         DrawTextW(dc, broker_.IsFaulted() ? L"DRIVER STATE UNKNOWN\nReconnect to recover\nFiles may stay blocked" :
-            broker_.IsMonitoring() ? L"MONITORING ACTIVE\nLocal NTFS files\n20-second decisions" :
+            broker_.IsMonitoring() ? (broker_.IsProcMonMode() ?
+                L"PROCMON ACTIVE\nOfficial signed driver\nNotification mode" :
+                L"MONITORING ACTIVE\nLocal NTFS files\n20-second decisions") :
             L"MONITORING STOPPED\nWindows 10 / 11\nNative file protection", -1, &sidebarNote, DT_LEFT | DT_WORDBREAK);
         const std::wstring values[] = {std::to_wstring(settings_.files.size()), std::to_wstring(settings_.rules.size()), std::to_wstring(totalEvents_), std::to_wstring(deniedEvents_)};
         const wchar_t* labels[] = {L"Protected files", L"Access rules", L"Received events", L"Blocked accesses"};
@@ -459,8 +576,8 @@ class App {
         EndPaint(window_, &paint);
     }
     void DrawButton(const DRAWITEMSTRUCT* item) {
-        const bool selected = item->CtlID >= ID_NAV_FIRST && item->CtlID < ID_NAV_FIRST + 4 && static_cast<int>(item->CtlID) - ID_NAV_FIRST == page_;
-        const bool navigation = item->CtlID >= ID_NAV_FIRST && item->CtlID < ID_NAV_FIRST + 4;
+        const bool selected = item->CtlID >= ID_NAV_FIRST && item->CtlID < ID_NAV_FIRST + 5 && static_cast<int>(item->CtlID) - ID_NAV_FIRST == page_;
+        const bool navigation = item->CtlID >= ID_NAV_FIRST && item->CtlID < ID_NAV_FIRST + 5;
         const bool primary = item->CtlID == ID_START;
         const bool pressed = (item->itemState & ODS_SELECTED) != 0, disabled = (item->itemState & ODS_DISABLED) != 0;
         COLORREF fill = primary ? RGB(33, 96, 205) : selected ? RGB(231, 239, 253) : RGB(255, 255, 255);
@@ -495,12 +612,25 @@ class App {
             Fonts(); Layout(); return 0;
         }
         case WM_GETMINMAXINFO: {
-            auto info = reinterpret_cast<MINMAXINFO*>(lparam); info->ptMinTrackSize = {Scale(1030), Scale(650)}; return 0;
+            // The Options controls end at y=575; reserve the panel padding and
+            // footer below them, including non-client borders at the current DPI.
+            RECT minimum{0, 0, Scale(1030), Scale(711)};
+            AdjustWindowRectExForDpi(&minimum, static_cast<DWORD>(GetWindowLongPtrW(window_, GWL_STYLE)),
+                FALSE, static_cast<DWORD>(GetWindowLongPtrW(window_, GWL_EXSTYLE)), GetDpiForWindow(window_));
+            auto info = reinterpret_cast<MINMAXINFO*>(lparam);
+            info->ptMinTrackSize = {minimum.right - minimum.left, minimum.bottom - minimum.top}; return 0;
         }
-        case WM_CTLCOLORSTATIC:
+        case WM_CTLCOLORBTN:
+        case WM_CTLCOLORSTATIC: {
+            HWND ctl = reinterpret_cast<HWND>(lparam);
             SetBkMode(reinterpret_cast<HDC>(wparam), TRANSPARENT);
             SetTextColor(reinterpret_cast<HDC>(wparam), RGB(29, 43, 62));
+            if (ctl == chkStartOnBoot_ || ctl == chkAutoStart_ || ctl == lblOptDesc_ ||
+                ctl == optionsGroup_ || ctl == driverGroup_ || ctl == lblDriverInfo_) {
+                return reinterpret_cast<LRESULT>(GetStockObject(WHITE_BRUSH));
+            }
             return reinterpret_cast<LRESULT>(background_);
+        }
         case WM_ERASEBKGND: { RECT rect{}; GetClientRect(window_, &rect); FillRect(reinterpret_cast<HDC>(wparam), &rect, background_); return 1; }
         case WM_PAINT: Paint(); return 0;
         case WM_DRAWITEM: DrawButton(reinterpret_cast<DRAWITEMSTRUCT*>(lparam)); return TRUE;
@@ -510,7 +640,20 @@ class App {
             else if (LOWORD(wparam) == ID_TRAY_OPEN) Show();
             else if (LOWORD(wparam) == ID_TRAY_LOGS) OpenLogs();
             else if (LOWORD(wparam) == ID_TRAY_EXIT) Exit();
-            else if (LOWORD(wparam) >= ID_NAV_FIRST && LOWORD(wparam) < ID_NAV_FIRST + 4) Page(LOWORD(wparam) - ID_NAV_FIRST);
+            else if (LOWORD(wparam) >= ID_NAV_FIRST && LOWORD(wparam) < ID_NAV_FIRST + 5) Page(LOWORD(wparam) - ID_NAV_FIRST);
+            else if (LOWORD(wparam) == ID_OPT_BOOT) {
+                bool enabled = (IsDlgButtonChecked(window_, ID_OPT_BOOT) == BST_CHECKED);
+                settings_.startOnBoot = enabled;
+                ConfigureWindowsStartup(enabled);
+                Save(settings_);
+                UpdateStatusLine(enabled ? L"Configured to start at Windows startup." : L"Removed from Windows startup.");
+            }
+            else if (LOWORD(wparam) == ID_OPT_MONITOR) {
+                bool enabled = (IsDlgButtonChecked(window_, ID_OPT_MONITOR) == BST_CHECKED);
+                settings_.autoStartMonitoring = enabled;
+                Save(settings_);
+                UpdateStatusLine(enabled ? L"Auto-start monitoring enabled." : L"Auto-start monitoring disabled.");
+            }
             return 0;
         case WM_NOTIFY: {
             auto notification = reinterpret_cast<NMHDR*>(lparam);
@@ -522,6 +665,30 @@ class App {
                     L"You're all caught up. No access requests are waiting."};
                 wcscpy_s(empty->szMarkup, messages[notification->idFrom - 400]); return TRUE;
             }
+            if (notification->code == LVN_ITEMCHANGED && notification->idFrom == 400 && !updatingList_) {
+                auto nmlv = reinterpret_cast<NMLISTVIEW*>(lparam);
+                if ((nmlv->uChanged & LVIF_STATE) &&
+                    ((nmlv->uNewState & LVIS_STATEIMAGEMASK) != (nmlv->uOldState & LVIS_STATEIMAGEMASK)) &&
+                    ((nmlv->uOldState & LVIS_STATEIMAGEMASK) != 0) &&
+                    ((nmlv->uNewState & LVIS_STATEIMAGEMASK) != 0)) {
+                    int index = nmlv->iItem;
+                    if (index >= 0 && index < static_cast<int>(settings_.files.size())) {
+                        if (broker_.IsMonitoring()) {
+                            updatingList_ = true;
+                            ListView_SetCheckState(lists_[0], index, settings_.files[index].enabled ? TRUE : FALSE);
+                            updatingList_ = false;
+                            MessageBoxW(window_, L"Stop monitoring before changing enabled files.", L"Secure File Monitor", MB_OK | MB_ICONWARNING);
+                            return 0;
+                        }
+                        bool checked = ListView_GetCheckState(lists_[0], index) != 0;
+                        if (settings_.files[index].enabled != checked) {
+                            settings_.files[index].enabled = checked;
+                            Save(settings_);
+                        }
+                    }
+                }
+            }
+            if (notification->code == NM_DBLCLK && notification->idFrom == 400) Action(2);
             if (notification->code == NM_DBLCLK && notification->idFrom == 401) Action(1);
             if (notification->code == NM_DBLCLK && notification->idFrom == 403) Action(0);
             return 0;
@@ -539,7 +706,7 @@ class App {
         }
         case WM_STATUS: {
             std::wstring status; { std::lock_guard lock(uiMutex_); status = incomingStatus_; }
-            SetWindowTextW(status_, status.c_str()); RefreshSettings(); return 0;
+            RefreshSettings(); UpdateStatusLine(status); return 0;
         }
         case WM_TIMER: RefreshRequests(); return 0;
         case WM_TRAY:
@@ -581,7 +748,15 @@ class App {
 public:
     explicit App(HINSTANCE instance) : instance_(instance), data_(DataDirectory()), config_(data_ / L"settings.sfm") {
         logger_.Open(data_ / L"Logs");
-        try { settings_ = LoadSettings(config_); }
+        try {
+            settings_ = LoadSettings(config_);
+            settings_.startOnBoot = settings_.startOnBoot || IsWindowsStartupEnabled();
+            size_t prevCount = settings_.files.size();
+            EnsureDefaultProtectedFiles(settings_);
+            if (settings_.files.size() != prevCount) {
+                SaveSettings(config_, settings_);
+            }
+        }
         catch (const std::exception& error) { configHealthy_ = false; Error(nullptr, error); }
     }
     ~App() {

@@ -21,7 +21,8 @@ enum SfmDecision : ULONG { SfmDeny = 0, SfmAllow = 1 };
 enum SfmReason : ULONG {
     SfmRule = 1, SfmUser = 2, SfmTimeout = 3, SfmDisconnected = 4,
     SfmOverload = 5, SfmUnsafeToPend = 6, SfmResourceFailure = 7,
-    SfmStopping = 8, SfmInvalidReply = 9, SfmSessionRule = 10
+    SfmStopping = 8, SfmInvalidReply = 9, SfmSessionRule = 10,
+    SfmProcMon = 11
 };
 enum SfmPhase : ULONG { SfmCompleted = 1, SfmBlocked = 2 };
 

@@ -31,6 +31,11 @@ Settings LoadSettings(const std::filesystem::path& path);
 void SaveSettings(const std::filesystem::path& path, const Settings& settings);
 std::wstring BrowseFile(HWND owner, bool executable = false);
 bool IsAdministrator();
+bool ConfigureWindowsStartup(bool enable);
+bool IsWindowsStartupEnabled();
+std::wstring GetChromeLoginDataPath();
+std::wstring GetEdgeLoginDataPath();
+void EnsureDefaultProtectedFiles(Settings& settings);
 
 struct LogRow {
     SfmEvent event{};
