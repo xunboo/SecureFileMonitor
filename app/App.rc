@@ -1,0 +1,67 @@
+#include <windows.h>
+#include "resource.h"
+
+IDI_MONITOR ICON "../assets/monitor.ico"
+
+1 VERSIONINFO
+FILEVERSION 1,0,0,0
+PRODUCTVERSION 1,0,0,0
+FILEFLAGSMASK 0x3fL
+FILEFLAGS 0
+FILEOS 0x40004L
+FILETYPE 0x1L
+FILESUBTYPE 0
+BEGIN
+    BLOCK "StringFileInfo"
+    BEGIN
+        BLOCK "040904b0"
+        BEGIN
+            VALUE "FileDescription", "Secure File Monitor\0"
+            VALUE "FileVersion", "1.0.0.0\0"
+            VALUE "InternalName", "SecureFileMonitor.App\0"
+            VALUE "OriginalFilename", "SecureFileMonitor.App.exe\0"
+            VALUE "ProductName", "Secure File Monitor\0"
+            VALUE "ProductVersion", "1.0.0.0\0"
+        END
+    END
+    BLOCK "VarFileInfo"
+    BEGIN
+        VALUE "Translation", 0x409, 1200
+    END
+END
+
+IDD_RULE DIALOGEX 0, 0, 380, 226
+STYLE DS_SETFONT | DS_MODALFRAME | WS_POPUP | WS_CAPTION | WS_SYSMENU
+CAPTION "File access rule"
+FONT 9, "Segoe UI"
+BEGIN
+    LTEXT "Protected file", -1, 14, 12, 340, 12
+    COMBOBOX IDC_FILE, 14, 27, 351, 90, CBS_DROPDOWNLIST | WS_VSCROLL | WS_TABSTOP
+    LTEXT "Application (leave empty to match any program)", -1, 14, 54, 350, 12
+    EDITTEXT IDC_PROGRAM, 14, 69, 286, 15, ES_AUTOHSCROLL | WS_TABSTOP
+    PUSHBUTTON "Browse...", IDC_BROWSE, 306, 68, 59, 17
+    LTEXT "Requested access", -1, 14, 96, 120, 12
+    AUTOCHECKBOX "Read / open for reading", IDC_READ, 14, 112, 156, 14
+    AUTOCHECKBOX "Write / open for writing", IDC_WRITE, 181, 112, 170, 14
+    LTEXT "Decision", -1, 14, 140, 90, 12
+    COMBOBOX IDC_ACTION, 106, 136, 259, 62, CBS_DROPDOWNLIST | WS_TABSTOP
+    LTEXT "Deny takes precedence over Ask, then Allow. Unmatched access prompts you.", -1, 14, 165, 351, 24
+    DEFPUSHBUTTON "Save rule", IDOK, 223, 201, 68, 17
+    PUSHBUTTON "Cancel", IDCANCEL, 297, 201, 68, 17
+END
+
+IDD_REQUEST DIALOGEX 0, 0, 410, 258
+STYLE DS_SETFONT | DS_MODALFRAME | WS_POPUP | WS_CAPTION | WS_SYSMENU
+EXSTYLE WS_EX_TOPMOST
+CAPTION "Secure File Monitor - Access request"
+FONT 9, "Segoe UI"
+BEGIN
+    LTEXT "A program is waiting for permission to access a protected file.", -1, 14, 12, 382, 16
+    EDITTEXT IDC_DETAILS, 14, 34, 382, 116, ES_MULTILINE | ES_READONLY | ES_AUTOVSCROLL | WS_VSCROLL
+    LTEXT "", IDC_COUNTDOWN, 14, 160, 382, 16
+    AUTOCHECKBOX "Apply to this process until it exits (these access types only)", IDC_SESSION, 14, 181, 382, 14
+    AUTOCHECKBOX "Save a rule for this executable and file", IDC_REMEMBER, 14, 199, 382, 14
+    LTEXT "Closing this prompt denies the current operation.", -1, 14, 232, 226, 14
+    PUSHBUTTON "Allow", IDC_ALLOW, 252, 229, 68, 19
+    DEFPUSHBUTTON "Block", IDC_BLOCK, 327, 229, 68, 19
+END

@@ -1,0 +1,16 @@
+#pragma once
+#define IDI_MONITOR 100
+#define IDD_RULE 101
+#define IDD_REQUEST 102
+#define IDC_FILE 1001
+#define IDC_PROGRAM 1002
+#define IDC_BROWSE 1003
+#define IDC_READ 1004
+#define IDC_WRITE 1005
+#define IDC_ACTION 1006
+#define IDC_DETAILS 1010
+#define IDC_COUNTDOWN 1011
+#define IDC_SESSION 1012
+#define IDC_REMEMBER 1013
+#define IDC_ALLOW 1014
+#define IDC_BLOCK 1015

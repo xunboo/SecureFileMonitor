@@ -1,0 +1,13 @@
+.vs/
+out/
+artifacts/
+packages/
+*.user
+*.VC.db
+*.VC.VC.opendb
+*.pdb
+*.obj
+*.tlog
+*.log
+driver/x64/
+x64/

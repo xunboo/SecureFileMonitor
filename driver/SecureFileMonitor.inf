@@ -1,0 +1,54 @@
+[Version]
+Signature = "$WINDOWS NT$"
+Class = "ActivityMonitor"
+ClassGuid = {b86dff51-a31e-4bac-b3cf-e8cfe75c9fc2}
+Provider = %Provider%
+DriverVer = 09/27/2026,1.0.0.0
+CatalogFile = SecureFileMonitor.cat
+PnpLockdown = 1
+
+[DestinationDirs]
+DriverFiles = 13
+
+[DefaultInstall.NTamd64]
+CopyFiles = DriverFiles
+
+[DefaultInstall.NTamd64.Services]
+AddService = SecureFileMonitor,,Service
+
+[Service]
+DisplayName = %ServiceName%
+Description = %ServiceDescription%
+ServiceBinary = %13%\SecureFileMonitor.sys
+ServiceType = 2
+StartType = 3
+ErrorControl = 1
+LoadOrderGroup = "FSFilter Activity Monitor"
+Dependencies = FltMgr
+AddReg = Instances
+
+[Instances]
+; The Parameters location is required by Windows 11 24H2 and newer.
+HKR,"Parameters\Instances","DefaultInstance",0x00000000,%InstanceName%
+HKR,"Parameters\Instances\SecureFileMonitor Instance","Altitude",0x00000000,"370030.42"
+HKR,"Parameters\Instances\SecureFileMonitor Instance","Flags",0x00010001,0
+; The development install script also supplies the legacy Instances location
+; on Windows 10 / earlier Windows 11. This INF targets current package rules.
+
+[DriverFiles]
+SecureFileMonitor.sys
+
+[SourceDisksNames]
+1 = %DiskName%,,,
+
+[SourceDisksFiles]
+SecureFileMonitor.sys = 1
+
+[Strings]
+Provider = "SecureFileMonitor Development"
+ServiceName = "Secure File Monitor"
+ServiceDescription = "Development file access decision and auditing minifilter"
+InstanceName = "SecureFileMonitor Instance"
+DiskName = "SecureFileMonitor installation media"
+; 370030.42 is a DEVELOPMENT placeholder, not a Microsoft-assigned altitude.
+; Obtain an assigned altitude before distributing a production driver.
