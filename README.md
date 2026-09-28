@@ -2,6 +2,8 @@
 
 A native C++ Windows desktop application and WDK file-system minifilter for making access decisions on selected local files. The Visual Studio 2026 solution contains the actual Win32 GUI, tray integration, kernel interception code, rule engine, persistent logging, and a separate process for exercising file I/O.
 
+![Secure File Monitor](assets/screenshot.png)
+
 **This is a development implementation for testing in a Windows VM.** The driver builds unsigned. It must be signed and installed before monitoring works. It has not been loaded or runtime-validated on this machine. The application does not substitute `FileSystemWatcher` notifications for access enforcement, and it does not claim that an absent driver is protecting files.
 
 ## Features
@@ -107,7 +109,7 @@ The native test suite checks rule precedence, combined-access authorization, pat
 - `shared/Protocol.h`: fixed-layout versioned communication contract with compile-time size checks.
 - `tests/`: native test runner.
 - `tools/`: read/write probe.
-- `assets/`: original app icon (`monitor.svg`, `monitor.ico`). Regenerate the ICO with `scripts\Generate-Icon.ps1`.
+- `assets/`: original app icon (`monitor.svg`, `monitor.ico`) and application screenshot (`screenshot.png`). Regenerate the ICO with `scripts\Generate-Icon.ps1`.
 - `scripts/`: build, test, development signing/install/removal helpers.
 - `docs/`: architecture and manual driver validation.
 
