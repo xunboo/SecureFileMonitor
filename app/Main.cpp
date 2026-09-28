@@ -99,13 +99,17 @@ class App {
     HWND status_ = nullptr, note_ = nullptr, prompt_ = nullptr;
     std::array<HWND, 3> actions_{};
     std::array<HWND, 4> lists_{};
-    std::array<HWND, 5> navigation_{};
+    std::array<HWND, 6> navigation_{};
     HWND optionsHeading_ = nullptr;
     HWND chkStartOnBoot_ = nullptr;
     HWND chkAutoStart_ = nullptr;
     HWND lblOptDesc_ = nullptr;
     HWND driverHeading_ = nullptr;
     HWND lblDriverInfo_ = nullptr;
+    HWND aboutHeading_ = nullptr;
+    HWND lblAboutDesc_ = nullptr;
+    HWND aboutTechHeading_ = nullptr;
+    HWND lblAboutTech_ = nullptr;
     HFONT font_ = nullptr, titleFont_ = nullptr;
     HBRUSH background_ = CreateSolidBrush(RGB(245, 247, 250));
     UINT taskbarCreated_ = RegisterWindowMessageW(L"TaskbarCreated");
@@ -198,7 +202,7 @@ class App {
         move(title_, Scale(238), Scale(26), width - Scale(454), Scale(38));
         move(subtitle_, Scale(240), Scale(71), width - Scale(264), Scale(24));
         move(start_, width - Scale(206), Scale(30), Scale(178), Scale(38));
-        for (int i = 0; i < 5; ++i) move(navigation_[i], Scale(14), Scale(123 + i * 49), Scale(180), Scale(41));
+        for (int i = 0; i < 6; ++i) move(navigation_[i], Scale(14), Scale(123 + i * 49), Scale(180), Scale(41));
         for (int i = 0; i < 3; ++i) move(actions_[i], Scale(254 + i * 173), Scale(224), Scale(160), Scale(32));
         for (HWND list : lists_) move(list, Scale(254), Scale(273), width - Scale(298), height - Scale(407));
         move(optionsHeading_, Scale(274), Scale(279), width - Scale(338), Scale(22));
@@ -207,6 +211,10 @@ class App {
         move(lblOptDesc_, Scale(274), Scale(368), width - Scale(338), Scale(52));
         move(driverHeading_, Scale(274), Scale(451), width - Scale(338), Scale(22));
         move(lblDriverInfo_, Scale(274), Scale(475), width - Scale(338), Scale(88));
+        move(aboutHeading_, Scale(274), Scale(279), width - Scale(338), Scale(22));
+        move(lblAboutDesc_, Scale(274), Scale(304), width - Scale(338), Scale(125));
+        move(aboutTechHeading_, Scale(274), Scale(451), width - Scale(338), Scale(22));
+        move(lblAboutTech_, Scale(274), Scale(475), width - Scale(338), Scale(88));
         move(note_, Scale(240), height - Scale(108), width - Scale(268), Scale(40));
         move(status_, Scale(240), height - Scale(58), width - Scale(268), Scale(44));
         RedrawWindow(window_, nullptr, nullptr, RDW_INVALIDATE | RDW_ERASE | RDW_ALLCHILDREN);
@@ -214,19 +222,21 @@ class App {
     void Page(int page) {
         page_ = page;
         for (HWND nav : navigation_) InvalidateRect(nav, nullptr, FALSE);
-        const wchar_t* texts[5][3] = {
+        const wchar_t* texts[6][3] = {
             {L"Add file...", L"Remove selected", L"Enable / Disable"},
             {L"Add rule...", L"Edit selected...", L"Remove selected"},
             {L"Export session CSV...", L"Open logs folder", L"Clear view"},
             {L"Review request", L"Allow once", L"Block once"},
-            {L"Open startup apps", L"Open config folder", L""}
+            {L"Open startup apps", L"Open config folder", L""},
+            {L"Open config folder", L"Open logs folder", L""}
         };
         const wchar_t* notes[] = {
             L"Select individual files on local NTFS volumes. Named streams are included. Stop monitoring to change this list.",
             L"Rules use full executable paths. Deny overrides Ask, then Allow. Editing rules clears temporary process permissions.",
             L"The view keeps the latest 2,000 events. JSONL and CSV session logs keep all received events, including denials and failures. Times are UTC.",
             L"The requesting program waits for your decision. Closing a prompt or reaching its 20-second deadline denies that operation.",
-            L"Configure Windows startup and monitoring automation preferences."
+            L"Configure Windows startup and monitoring automation preferences.",
+            L"Secure File Monitor Version 1.0.0.0 — Native file access security, observation, and protection."
         };
         for (int i = 0; i < 4; ++i) ShowWindow(lists_[i], i == page ? SW_SHOW : SW_HIDE);
         const int optShow = (page == 4) ? SW_SHOW : SW_HIDE;
@@ -236,6 +246,11 @@ class App {
         ShowWindow(lblOptDesc_, optShow);
         ShowWindow(driverHeading_, optShow);
         ShowWindow(lblDriverInfo_, optShow);
+        const int aboutShow = (page == 5) ? SW_SHOW : SW_HIDE;
+        ShowWindow(aboutHeading_, aboutShow);
+        ShowWindow(lblAboutDesc_, aboutShow);
+        ShowWindow(aboutTechHeading_, aboutShow);
+        ShowWindow(lblAboutTech_, aboutShow);
         for (int i = 0; i < 3; ++i) {
             SetWindowTextW(actions_[i], texts[page][i]); ShowWindow(actions_[i], *texts[page][i] ? SW_SHOW : SW_HIDE);
             EnableWindow(actions_[i], page != 0 || !broker_.IsMonitoring());
@@ -357,6 +372,9 @@ class App {
         } else if (page_ == 4) {
             if (button == 0) ShellExecuteW(window_, L"open", L"ms-settings:startupapps", nullptr, nullptr, SW_SHOWNORMAL);
             else if (button == 1) ShellExecuteW(window_, L"open", data_.c_str(), nullptr, nullptr, SW_SHOWNORMAL);
+        } else if (page_ == 5) {
+            if (button == 0) ShellExecuteW(window_, L"open", data_.c_str(), nullptr, nullptr, SW_SHOWNORMAL);
+            else if (button == 1) ShellExecuteW(window_, L"open", (data_ / L"Logs").c_str(), nullptr, nullptr, SW_SHOWNORMAL);
         }
     }
     void RefreshRequests() {
@@ -472,7 +490,7 @@ class App {
         subtitle_ = Control(L"STATIC", L"", 0);
         start_ = Control(L"BUTTON", L"Start monitoring", WS_TABSTOP | BS_OWNERDRAW, ID_START);
         int tabIndex = 0;
-        for (const auto* text : {L"Protected files", L"Access rules", L"Live access log", L"Pending requests", L"Options"}) {
+        for (const auto* text : {L"Protected files", L"Access rules", L"Live access log", L"Pending requests", L"Options", L"About"}) {
             navigation_[tabIndex] = Control(L"BUTTON", text, WS_TABSTOP | BS_OWNERDRAW, ID_NAV_FIRST + tabIndex);
             ++tabIndex;
         }
@@ -484,11 +502,11 @@ class App {
             ListView_SetExtendedListViewStyle(lists_[i], exStyle);
             SetWindowTheme(lists_[i], L"Explorer", nullptr);
         }
-        Columns(lists_[0], {{L"Enable", 100}, {L"Protected file", 560}, {L"Scope", 160}, {L"State", 120}});
-        Columns(lists_[1], {{L"File", 370}, {L"Application", 370}, {L"Access", 150}, {L"Decision", 100}});
-        Columns(lists_[2], {{L"Time (UTC)", 190}, {L"PID", 70}, {L"Program", 240}, {L"File", 300}, {L"Operation", 130},
+        Columns(lists_[0], {{L"Enable", 100}, {L"Protected file", 720}, {L"Scope", 160}, {L"State", 120}});
+        Columns(lists_[1], {{L"File", 440}, {L"Application", 440}, {L"Access", 150}, {L"Decision", 100}});
+        Columns(lists_[2], {{L"Time (UTC)", 180}, {L"PID", 70}, {L"Program", 260}, {L"File", 340}, {L"Operation", 120},
             {L"Decision", 80}, {L"Reason", 180}, {L"NTSTATUS", 100}, {L"Bytes: requested / actual", 175}});
-        Columns(lists_[3], {{L"Time left", 80}, {L"PID", 70}, {L"Program", 310}, {L"File", 370}, {L"Access", 150}});
+        Columns(lists_[3], {{L"Time left", 90}, {L"PID", 70}, {L"Program", 380}, {L"File", 450}, {L"Access", 150}});
 
         // Section borders are painted by the parent. Full-size group-box child
         // windows overlap the sibling controls and clip the parent's background.
@@ -503,6 +521,23 @@ class App {
             0);
         driverHeading_ = Control(L"STATIC", L"Driver Information & Mode", SS_NOPREFIX);
         lblDriverInfo_ = Control(L"STATIC", L"", 0);
+
+        aboutHeading_ = Control(L"STATIC", L"About Secure File Monitor — Version 1.0.0.0", SS_NOPREFIX);
+        lblAboutDesc_ = Control(L"STATIC",
+            L"Secure File Monitor is a native Windows security utility for real-time monitoring and attended access control of local files.\n\n"
+            L"• Dual-Engine Protection:\n"
+            L"   - Active Interception Mode: Uses SecureFileMonitor.sys minifilter for pre-operation I/O blocking and interactive user prompts.\n"
+            L"   - Passive Notification Mode: Uses signed Sysinternals driver (PROCMON24/25.SYS) for zero-configuration alerts without Test Mode.\n"
+            L"• Intelligent Defaults: Auto-detects sensitive browser credential stores (Google Chrome & Microsoft Edge Login Data).\n"
+            L"• Complete Transparency: Detailed audit trail with real-time alerts, CSV/JSONL logs, and configurable rules.",
+            0);
+        aboutTechHeading_ = Control(L"STATIC", L"Architecture & License", SS_NOPREFIX);
+        lblAboutTech_ = Control(L"STATIC",
+            L"• Version: 1.0.0.0 (x64 Release)\n"
+            L"• Target OS: Windows 10 / Windows 11 (64-bit)\n"
+            L"• License: MIT License — Open Source Software\n"
+            L"• Data & Logs Directory: %LOCALAPPDATA%\\SecureFileMonitor",
+            0);
 
         note_ = Control(L"STATIC", L"", 0);
         status_ = Control(L"STATIC", L"", 0);
@@ -578,12 +613,17 @@ class App {
             RECT driver{Scale(254), Scale(445), area.right - Scale(44), Scale(575)};
             Rounded(dc, options, Scale(6), RGB(255, 255, 255), RGB(215, 221, 231));
             Rounded(dc, driver, Scale(6), RGB(255, 255, 255), RGB(215, 221, 231));
+        } else if (page_ == 5) {
+            RECT aboutBox{Scale(254), Scale(273), area.right - Scale(44), Scale(433)};
+            RECT techBox{Scale(254), Scale(445), area.right - Scale(44), Scale(575)};
+            Rounded(dc, aboutBox, Scale(6), RGB(255, 255, 255), RGB(215, 221, 231));
+            Rounded(dc, techBox, Scale(6), RGB(255, 255, 255), RGB(215, 221, 231));
         }
         EndPaint(window_, &paint);
     }
     void DrawButton(const DRAWITEMSTRUCT* item) {
-        const bool selected = item->CtlID >= ID_NAV_FIRST && item->CtlID < ID_NAV_FIRST + 5 && static_cast<int>(item->CtlID) - ID_NAV_FIRST == page_;
-        const bool navigation = item->CtlID >= ID_NAV_FIRST && item->CtlID < ID_NAV_FIRST + 5;
+        const bool selected = item->CtlID >= ID_NAV_FIRST && item->CtlID < ID_NAV_FIRST + 6 && static_cast<int>(item->CtlID) - ID_NAV_FIRST == page_;
+        const bool navigation = item->CtlID >= ID_NAV_FIRST && item->CtlID < ID_NAV_FIRST + 6;
         const bool primary = item->CtlID == ID_START;
         const bool pressed = (item->itemState & ODS_SELECTED) != 0, disabled = (item->itemState & ODS_DISABLED) != 0;
         COLORREF fill = primary ? RGB(33, 96, 205) : selected ? RGB(231, 239, 253) : RGB(255, 255, 255);
@@ -632,7 +672,8 @@ class App {
             SetBkMode(reinterpret_cast<HDC>(wparam), TRANSPARENT);
             SetTextColor(reinterpret_cast<HDC>(wparam), RGB(29, 43, 62));
             if (ctl == chkStartOnBoot_ || ctl == chkAutoStart_ || ctl == lblOptDesc_ ||
-                ctl == optionsHeading_ || ctl == driverHeading_ || ctl == lblDriverInfo_) {
+                ctl == optionsHeading_ || ctl == driverHeading_ || ctl == lblDriverInfo_ ||
+                ctl == aboutHeading_ || ctl == lblAboutDesc_ || ctl == aboutTechHeading_ || ctl == lblAboutTech_) {
                 return reinterpret_cast<LRESULT>(GetStockObject(WHITE_BRUSH));
             }
             return reinterpret_cast<LRESULT>(background_);
@@ -648,7 +689,7 @@ class App {
             else if (LOWORD(wparam) == ID_TRAY_OPEN) Show();
             else if (LOWORD(wparam) == ID_TRAY_LOGS) OpenLogs();
             else if (LOWORD(wparam) == ID_TRAY_EXIT) Exit();
-            else if (LOWORD(wparam) >= ID_NAV_FIRST && LOWORD(wparam) < ID_NAV_FIRST + 5) Page(LOWORD(wparam) - ID_NAV_FIRST);
+            else if (LOWORD(wparam) >= ID_NAV_FIRST && LOWORD(wparam) < ID_NAV_FIRST + 6) Page(LOWORD(wparam) - ID_NAV_FIRST);
             else if (LOWORD(wparam) == ID_OPT_BOOT) {
                 bool enabled = (IsDlgButtonChecked(window_, ID_OPT_BOOT) == BST_CHECKED);
                 Settings next = settings_;
@@ -780,8 +821,17 @@ public:
         klass.lpszClassName = L"SecureFileMonitor.MainWindow"; klass.hCursor = LoadCursorW(nullptr, IDC_ARROW);
         klass.hIcon = LoadIconW(instance_, MAKEINTRESOURCEW(IDI_MONITOR)); klass.hIconSm = klass.hIcon;
         if (!RegisterClassExW(&klass)) throw std::runtime_error("Cannot register main window.");
+        RECT workArea{};
+        SystemParametersInfoW(SPI_GETWORKAREA, 0, &workArea, 0);
+        int workWidth = workArea.right - workArea.left;
+        int workHeight = workArea.bottom - workArea.top;
+        int width = (std::min)(1420, (std::max)(1030, workWidth));
+        int height = 930;
+        int x = (std::max)(0, static_cast<int>(workArea.left + (workWidth - width) / 2));
+        int y = (std::max)(0, static_cast<int>(workArea.top + (workHeight - height) / 2));
+
         if (!CreateWindowExW(0, klass.lpszClassName, L"Secure File Monitor", WS_OVERLAPPEDWINDOW | WS_CLIPCHILDREN,
-            CW_USEDEFAULT, CW_USEDEFAULT, 1240, 800, nullptr, nullptr, instance_, this))
+            x, y, width, height, nullptr, nullptr, instance_, this))
             throw std::runtime_error("Cannot create main window.");
         ShowWindow(window_, show); UpdateWindow(window_);
         MSG message{};
